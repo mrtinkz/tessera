@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "feat/**", "fix/**", "chore/**", "security/**"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: type-check → lint → test+coverage → build → audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Type-check
+        run: npm run type-check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test with coverage
+        run: npm run test:coverage
+
+      - name: Build
+        run: npm run build
+
+      - name: Security audit (high+)
+        # The two remaining moderate CVEs are in esbuild (via vite dev server
+        # only — not the published bundle) and are unfixable without a vite
+        # major-version breaking change. Fail on high or critical only.
+        run: npm audit --audit-level=high

@@ -1,0 +1,28 @@
+# Exclude sourcemaps from the published package.
+# Consumers get clean dist/ files; sourcemaps stay in the repo for debugging.
+dist/**/*.map
+
+# Dev-only files never needed by consumers.
+src/
+tests/
+coverage/
+docs/
+example/
+.github/
+.husky/
+.eslintrc.json
+.prettierrc
+.editorconfig
+tsconfig.json
+tsup.config.ts
+vitest.config.ts
+
+# Planning / progress docs.
+PLAN.md
+PROGRESS.md
+CHANGELOG.md
+
+# OS / editor noise.
+.DS_Store
+Thumbs.db
+*.log

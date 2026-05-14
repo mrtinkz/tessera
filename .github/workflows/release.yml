@@ -1,0 +1,85 @@
+name: Release
+
+# Triggered only when a version tag is pushed: git tag v0.1.0 && git push --tags
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write  # needed to create a GitHub Release
+  id-token: write  # needed for npm provenance attestation (SLSA)
+
+jobs:
+  # ── 1. Run the full CI suite first ─────────────────────────────────────────
+  ci:
+    name: CI gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Type-check
+        run: npm run type-check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test with coverage
+        run: npm run test:coverage
+
+      - name: Build
+        run: npm run build
+
+      - name: Security audit
+        run: npm audit --audit-level=high
+
+  # ── 2. Publish to npm (only after CI passes) ────────────────────────────────
+  publish:
+    name: Publish to npm
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          # Points npm publish at the public registry with your token
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ── 3. Create a GitHub Release with the tag notes ───────────────────────────
+  github-release:
+    name: GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history for changelog generation
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/index.global.global.js

@@ -1,0 +1,142 @@
+{
+  "name": "tessera",
+  "version": "0.1.0",
+  "description": "One passcode. Your browser storage, encrypted. Zero dependencies.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "browser": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.global.global.js"
+      },
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./react": {
+      "import": {
+        "types": "./dist/react/index.d.ts",
+        "default": "./dist/react/index.js"
+      },
+      "require": {
+        "types": "./dist/react/index.d.cts",
+        "default": "./dist/react/index.cjs"
+      }
+    },
+    "./vue": {
+      "import": {
+        "types": "./dist/vue/index.d.ts",
+        "default": "./dist/vue/index.js"
+      },
+      "require": {
+        "types": "./dist/vue/index.d.cts",
+        "default": "./dist/vue/index.cjs"
+      }
+    },
+    "./svelte": {
+      "import": {
+        "types": "./dist/svelte/index.d.ts",
+        "default": "./dist/svelte/index.js"
+      }
+    },
+    "./angular": {
+      "import": {
+        "types": "./dist/angular/index.d.ts",
+        "default": "./dist/angular/index.js"
+      },
+      "require": {
+        "types": "./dist/angular/index.d.cts",
+        "default": "./dist/angular/index.cjs"
+      }
+    }
+  },
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.cjs",
+    "dist/**/*.d.ts",
+    "dist/**/*.d.cts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup && npm run build:example",
+    "build:example": "node -e \"require('fs').copyFileSync('dist/index.global.global.js','example/tessera.js')\"",
+    "dev": "tsup --watch",
+    "type-check": "tsc --noEmit",
+    "lint": "eslint src/ --ext .ts,.tsx",
+    "lint:fix": "eslint src/ --ext .ts,.tsx --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:changed": "vitest --changed",
+    "test:coverage": "vitest run --coverage",
+    "prepublishOnly": "npm run build && npm run type-check && npm run lint && npm run test:coverage",
+    "prepare": "husky"
+  },
+  "peerDependencies": {
+    "@angular/core": ">=14.0.0",
+    "react": ">=17.0.0",
+    "svelte": ">=3.0.0",
+    "vue": ">=3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "vue": {
+      "optional": true
+    },
+    "@angular/core": {
+      "optional": true
+    },
+    "svelte": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@angular/core": "21.2.13",
+    "@types/react": "19.1.2",
+    "@typescript-eslint/eslint-plugin": "7.18.0",
+    "@typescript-eslint/parser": "7.18.0",
+    "@vitest/coverage-v8": "2.1.8",
+    "eslint": "8.57.1",
+    "eslint-import-resolver-typescript": "4.4.4",
+    "eslint-plugin-import": "2.31.0",
+    "eslint-plugin-security": "3.0.1",
+    "eslint-plugin-unicorn": "55.0.0",
+    "fake-indexeddb": "6.0.0",
+    "happy-dom": "20.9.0",
+    "husky": "9.1.6",
+    "lint-staged": "15.5.2",
+    "prettier": "3.4.2",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "svelte": "5.55.5",
+    "tsup": "8.5.1",
+    "typescript": "5.6.3",
+    "vite": "5.4.11",
+    "vitest": "2.1.9",
+    "vue": "3.5.13"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,yaml,yml}": [
+      "prettier --write"
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+node_modules
+dist
+coverage
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+*.log
+.env
+
+# Manual-test example — not committed, not published.
+example/tessera.js
+
+# Planning and progress docs — not committed.
+PLAN.md
+PROGRESS.md
+PLAN.md
+PROGRESS.md
+PLAN.md

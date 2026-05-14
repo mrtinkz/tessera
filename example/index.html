@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>tessera — manual test harness</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      margin: 0;
+      padding: 24px;
+      min-height: 100vh;
+    }
+
+    h1 { font-size: 1.5rem; font-weight: 700; margin: 0 0 4px; }
+    .subtitle { color: #94a3b8; font-size: 0.875rem; margin-bottom: 24px; }
+
+    .layout { display: grid; grid-template-columns: 300px 1fr; gap: 24px; }
+
+    /* ── PIN pad column ─────────────────────────────────────────── */
+    .pin-column {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .status-badge {
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .status-badge.locked   { background: #7f1d1d; color: #fca5a5; }
+    .status-badge.unlocked { background: #14532d; color: #86efac; }
+
+    /* PIN pad theme overrides */
+    .pin-container {
+      --tessera-pad-bg:         #1e293b;
+      --tessera-btn-bg:         #334155;
+      --tessera-btn-color:      #e2e8f0;
+      --tessera-btn-hover:      #475569;
+      --tessera-indicator-color:#38bdf8;
+      --tessera-error-color:    #f87171;
+      --tessera-btn-size:       64px;
+    }
+
+    .passcode-hint {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 0.8rem;
+      color: #94a3b8;
+      width: 100%;
+      text-align: center;
+      line-height: 1.6;
+    }
+    .passcode-hint strong { color: #38bdf8; font-family: monospace; font-size: 1rem; }
+
+    button.action {
+      padding: 8px 18px;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      background: #1e293b;
+      color: #e2e8f0;
+      cursor: pointer;
+      font-size: 0.875rem;
+      width: 100%;
+    }
+    button.action:hover { background: #334155; }
+    button.action.danger { border-color: #7f1d1d; color: #f87171; }
+    button.action.danger:hover { background: #7f1d1d33; }
+    button.action:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    /* ── Operations column ──────────────────────────────────────── */
+    .ops-column { display: flex; flex-direction: column; gap: 16px; }
+
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 10px;
+      padding: 16px;
+    }
+    .card h2 { margin: 0 0 12px; font-size: 1rem; color: #94a3b8; }
+
+    .row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+    .row label { font-size: 0.8rem; color: #94a3b8; width: 100px; flex-shrink: 0; }
+    .row input {
+      flex: 1;
+      padding: 6px 10px;
+      border: 1px solid #334155;
+      border-radius: 5px;
+      background: #0f172a;
+      color: #e2e8f0;
+      font-size: 0.875rem;
+    }
+    .row button {
+      padding: 6px 14px;
+      border: 1px solid #475569;
+      border-radius: 5px;
+      background: #334155;
+      color: #e2e8f0;
+      cursor: pointer;
+      font-size: 0.8rem;
+      white-space: nowrap;
+    }
+    .row button:hover { background: #475569; }
+
+    .result {
+      margin-top: 8px;
+      padding: 8px 10px;
+      background: #0f172a;
+      border-radius: 5px;
+      font-size: 0.8rem;
+      font-family: 'Menlo', 'Consolas', monospace;
+      color: #38bdf8;
+      min-height: 32px;
+      word-break: break-all;
+      white-space: pre-wrap;
+    }
+    .raw-label { margin-top: 8px; font-size: 0.75rem; color: #64748b; }
+
+    #log {
+      height: 160px;
+      overflow-y: auto;
+      background: #0f172a;
+      border: 1px solid #1e293b;
+      border-radius: 6px;
+      padding: 10px;
+      font-size: 0.75rem;
+      font-family: monospace;
+    }
+    #log .entry       { margin: 2px 0; color: #94a3b8; }
+    #log .entry.ok    { color: #86efac; }
+    #log .entry.err   { color: #f87171; }
+    #log .entry.info  { color: #38bdf8; }
+  </style>
+</head>
+<body>
+  <!-- file:// protocol warning -->
+  <div id="file-warning" style="display:none; background:#78350f; border:1px solid #92400e; border-radius:8px; padding:12px 16px; margin-bottom:20px; font-size:0.85rem; color:#fde68a; line-height:1.6;">
+    ⚠️ <strong>Running over file://</strong> — browsers block cookies on the <code>file://</code> protocol.<br>
+    Cookie set/get will return <code>null</code>. All other features work fine.<br>
+    To test cookies: run <code>npx serve</code> from the <strong>example/</strong> folder
+    and open <code>http://localhost:3000</code>
+  </div>
+
+  <h1>tessera</h1>
+  <p class="subtitle">Manual test harness — not committed, not published</p>
+
+  <div class="layout">
+
+    <!-- ── Left column: PIN pad ───────────────────────────────── -->
+    <div class="pin-column">
+
+      <div id="vault-status" class="status-badge locked">🔒 Locked</div>
+
+      <div class="passcode-hint">
+        Enter a <strong>6-digit</strong> passcode<br>
+        using the keypad below.<br><br>
+        Try <strong>123456</strong> to get started.<br><br>
+        <span style="color:#86efac; font-size:0.75rem;">
+          ✓ Same passcode = same key across sessions.<br>
+          Use the same PIN to read data you<br>
+          wrote in a previous session.
+        </span>
+      </div>
+
+      <div class="pin-container" id="pin-mount"></div>
+
+      <button class="action danger" id="btn-lock" disabled>Lock vault</button>
+      <button class="action danger" id="btn-wipe">Wipe all storage</button>
+
+    </div>
+
+    <!-- ── Right column: storage operations ─────────────────── -->
+    <div class="ops-column">
+
+      <!-- localStorage -->
+      <div class="card">
+        <h2>localStorage</h2>
+        <div class="row">
+          <label>key</label>
+          <input id="ls-key" value="cart" />
+          <label style="width:auto">value</label>
+          <input id="ls-val" value='{"items":["apple","bread"]}' />
+        </div>
+        <div class="row">
+          <button onclick="lsSet()">setItem</button>
+          <button onclick="lsGet()">getItem</button>
+          <button onclick="lsRemove()">removeItem</button>
+          <button onclick="lsClear()">clear</button>
+          <button onclick="lsKeys()">keys</button>
+        </div>
+        <div class="result" id="ls-result">—</div>
+        <div class="raw-label">Raw ciphertext in storage:</div>
+        <div class="result" id="ls-raw">—</div>
+      </div>
+
+      <!-- sessionStorage -->
+      <div class="card">
+        <h2>sessionStorage</h2>
+        <div class="row">
+          <label>key</label>
+          <input id="ss-key" value="draft" />
+          <label style="width:auto">value</label>
+          <input id="ss-val" value="Hello 🔐 world" />
+        </div>
+        <div class="row">
+          <button onclick="ssSet()">setItem</button>
+          <button onclick="ssGet()">getItem</button>
+          <button onclick="ssRemove()">removeItem</button>
+        </div>
+        <div class="result" id="ss-result">—</div>
+      </div>
+
+      <!-- Cookie -->
+      <div class="card">
+        <h2>Cookie</h2>
+        <div class="row">
+          <label>name</label>
+          <input id="ck-name" value="theme" />
+          <label style="width:auto">value</label>
+          <input id="ck-val" value="dark-mode-enabled" />
+        </div>
+        <div class="row">
+          <button onclick="ckSet()">set</button>
+          <button onclick="ckGet()">get</button>
+          <button onclick="ckRemove()">remove</button>
+        </div>
+        <div class="result" id="ck-result">—</div>
+      </div>
+
+      <!-- IndexedDB -->
+      <div class="card">
+        <h2>IndexedDB</h2>
+        <div class="row">
+          <label>store</label>
+          <input id="idb-store" value="orders" />
+          <label style="width:auto">key</label>
+          <input id="idb-key" value="order-42" />
+        </div>
+        <div class="row">
+          <label>value (JSON)</label>
+          <input id="idb-val" value='{"total":199,"items":["widget"]}' style="flex:1" />
+        </div>
+        <div class="row">
+          <button onclick="idbPut()">put</button>
+          <button onclick="idbGet()">get</button>
+          <button onclick="idbRemove()">remove</button>
+          <button onclick="idbClear()">clear store</button>
+        </div>
+        <div class="result" id="idb-result">—</div>
+      </div>
+
+      <!-- Activity log -->
+      <div class="card">
+        <h2>Activity log</h2>
+        <div id="log"></div>
+        <div style="margin-top:8px">
+          <button class="action" onclick="document.getElementById('log').innerHTML=''">Clear log</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!--
+    The IIFE global is `TesseraLib` (the module namespace).
+    Destructure what you need:  const { Tessera, renderPinPad } = TesseraLib;
+  -->
+  <!-- tessera.js is copied here by `npm run build` — serves from any directory -->
+  <script src="./tessera.js"></script>
+
+  <script>
+    // ── Show file:// warning ──────────────────────────────────────────────────
+    if (location.protocol === 'file:') {
+      document.getElementById('file-warning').style.display = 'block';
+    }
+
+    // ── Destructure from the IIFE namespace ───────────────────────────────────
+    const { Tessera, renderPinPad, TesseraError, TesseraErrorCode } = TesseraLib;
+
+    // ── State ─────────────────────────────────────────────────────────────────
+    let vault = null;
+    let pinCleanup = null;
+
+    // ── Logging ───────────────────────────────────────────────────────────────
+    function log(msg, type = 'info') {
+      const el = document.getElementById('log');
+      const entry = document.createElement('div');
+      entry.className = 'entry ' + type;
+      entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      el.prepend(entry);
+    }
+
+    // ── Vault status ─────────────────────────────────────────────────────────
+    function refreshStatus() {
+      const badge   = document.getElementById('vault-status');
+      const lockBtn = document.getElementById('btn-lock');
+      const locked  = !vault || vault.isLocked();
+      badge.textContent  = locked ? '🔒 Locked' : '🔓 Unlocked';
+      badge.className    = 'status-badge ' + (locked ? 'locked' : 'unlocked');
+      lockBtn.disabled   = locked;
+    }
+
+    // ── PIN pad ───────────────────────────────────────────────────────────────
+    function mountPinPad() {
+      if (pinCleanup) { pinCleanup(); pinCleanup = null; }
+
+      const mount = document.getElementById('pin-mount');
+
+      pinCleanup = renderPinPad(mount, {
+        length: 6,
+        randomize: true,
+        onUnlock: async (passcode) => {
+          try {
+            vault = await Tessera.unlock(passcode, {
+              iterations:      310_000,
+              idleTimeout:     300_000,   // 5 min idle for demo
+              lockoutAttempts: 5,
+              lockoutAction:  'delay',
+            });
+            refreshStatus();
+            log(`Vault unlocked. (passcode length: ${passcode.length})`, 'ok');
+          } catch (err) {
+            log(`Unlock failed: ${err.message}`, 'err');
+            // Re-mount so the user can try again immediately.
+            setTimeout(mountPinPad, 200);
+          }
+        },
+      });
+    }
+
+    mountPinPad();
+    refreshStatus();
+
+    // ── Lock / wipe ───────────────────────────────────────────────────────────
+    document.getElementById('btn-lock').addEventListener('click', () => {
+      vault?.lock();
+      vault = null;
+      refreshStatus();
+      mountPinPad();
+      log('Vault locked manually.', 'info');
+    });
+
+    document.getElementById('btn-wipe').addEventListener('click', () => {
+      vault?.lock();
+      vault = null;
+      localStorage.clear();
+      sessionStorage.clear();
+      refreshStatus();
+      mountPinPad();
+      log('All storage wiped manually.', 'err');
+    });
+
+    // ── Guard ─────────────────────────────────────────────────────────────────
+    function requireVault(label) {
+      if (!vault || vault.isLocked()) {
+        log(`${label}: vault is locked — unlock first.`, 'err');
+        return false;
+      }
+      return true;
+    }
+
+    function show(id, value) {
+      document.getElementById(id).textContent =
+        value === null      ? 'null'      :
+        value === undefined ? 'undefined' :
+        typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
+    }
+
+    // ── localStorage ─────────────────────────────────────────────────────────
+    async function lsSet() {
+      if (!requireVault('ls.setItem')) return;
+      const k = document.getElementById('ls-key').value;
+      const v = document.getElementById('ls-val').value;
+      try {
+        await vault.local.setItem(k, v);
+        show('ls-result', 'OK');
+        show('ls-raw', localStorage.getItem(k));
+        log(`ls.setItem("${k}") ✓`, 'ok');
+      } catch (e) { log(`ls.setItem error: ${e.message}`, 'err'); }
+    }
+
+    async function lsGet() {
+      if (!requireVault('ls.getItem')) return;
+      const k = document.getElementById('ls-key').value;
+      const v = await vault.local.getItem(k);
+      show('ls-result', v);
+      log(`ls.getItem("${k}") = ${v}`, 'ok');
+    }
+
+    async function lsRemove() {
+      if (!requireVault('ls.removeItem')) return;
+      const k = document.getElementById('ls-key').value;
+      await vault.local.removeItem(k);
+      show('ls-result', 'removed');
+      show('ls-raw', localStorage.getItem(k));
+      log(`ls.removeItem("${k}") ✓`, 'ok');
+    }
+
+    async function lsClear() {
+      if (!requireVault('ls.clear')) return;
+      await vault.local.clear();
+      show('ls-result', 'cleared');
+      log('ls.clear() ✓', 'ok');
+    }
+
+    async function lsKeys() {
+      if (!requireVault('ls.keys')) return;
+      const keys = await vault.local.keys();
+      show('ls-result', keys);
+      log(`ls.keys() → [${keys.join(', ')}]`, 'ok');
+    }
+
+    // ── sessionStorage ────────────────────────────────────────────────────────
+    async function ssSet() {
+      if (!requireVault('ss.setItem')) return;
+      const k = document.getElementById('ss-key').value;
+      const v = document.getElementById('ss-val').value;
+      try {
+        await vault.session.setItem(k, v);
+        show('ss-result', 'OK — raw: ' + sessionStorage.getItem(k));
+        log(`ss.setItem("${k}") ✓`, 'ok');
+      } catch (e) { log(`ss.setItem error: ${e.message}`, 'err'); }
+    }
+
+    async function ssGet() {
+      if (!requireVault('ss.getItem')) return;
+      const k = document.getElementById('ss-key').value;
+      const v = await vault.session.getItem(k);
+      show('ss-result', v);
+      log(`ss.getItem("${k}") = ${v}`, 'ok');
+    }
+
+    async function ssRemove() {
+      if (!requireVault('ss.removeItem')) return;
+      const k = document.getElementById('ss-key').value;
+      await vault.session.removeItem(k);
+      show('ss-result', 'removed');
+      log(`ss.removeItem("${k}") ✓`, 'ok');
+    }
+
+    // ── Cookie ────────────────────────────────────────────────────────────────
+    async function ckSet() {
+      if (!requireVault('cookie.set')) return;
+      const n = document.getElementById('ck-name').value;
+      const v = document.getElementById('ck-val').value;
+      try {
+        await vault.cookie.set(n, v, { expires: 1 });
+        show('ck-result', 'OK — value is stored as ciphertext');
+        log(`cookie.set("${n}") ✓`, 'ok');
+      } catch (e) { log(`cookie.set error: ${e.message}`, 'err'); }
+    }
+
+    async function ckGet() {
+      if (!requireVault('cookie.get')) return;
+      const n = document.getElementById('ck-name').value;
+      const v = await vault.cookie.get(n);
+      show('ck-result', v);
+      log(`cookie.get("${n}") = ${v}`, 'ok');
+    }
+
+    async function ckRemove() {
+      if (!requireVault('cookie.remove')) return;
+      const n = document.getElementById('ck-name').value;
+      await vault.cookie.remove(n);
+      show('ck-result', 'removed');
+      log(`cookie.remove("${n}") ✓`, 'ok');
+    }
+
+    // ── IndexedDB ─────────────────────────────────────────────────────────────
+    async function idbPut() {
+      if (!requireVault('idb.put')) return;
+      const store = document.getElementById('idb-store').value;
+      const key   = document.getElementById('idb-key').value;
+      try {
+        const value = JSON.parse(document.getElementById('idb-val').value);
+        await vault.idb.put(store, key, value);
+        show('idb-result', 'OK');
+        log(`idb.put("${store}", "${key}") ✓`, 'ok');
+      } catch (e) { log(`idb.put error: ${e.message}`, 'err'); }
+    }
+
+    async function idbGet() {
+      if (!requireVault('idb.get')) return;
+      const store = document.getElementById('idb-store').value;
+      const key   = document.getElementById('idb-key').value;
+      const v = await vault.idb.get(store, key);
+      show('idb-result', v);
+      log(`idb.get("${store}", "${key}") = ${JSON.stringify(v)}`, 'ok');
+    }
+
+    async function idbRemove() {
+      if (!requireVault('idb.remove')) return;
+      const store = document.getElementById('idb-store').value;
+      const key   = document.getElementById('idb-key').value;
+      await vault.idb.remove(store, key);
+      show('idb-result', 'removed');
+      log(`idb.remove("${store}", "${key}") ✓`, 'ok');
+    }
+
+    async function idbClear() {
+      if (!requireVault('idb.clear')) return;
+      const store = document.getElementById('idb-store').value;
+      await vault.idb.clear(store);
+      show('idb-result', `cleared "${store}"`);
+      log(`idb.clear("${store}") ✓`, 'ok');
+    }
+
+    // ── Auto-lock polling ─────────────────────────────────────────────────────
+    setInterval(() => {
+      if (vault && vault.isLocked()) {
+        vault = null;
+        refreshStatus();
+        mountPinPad();
+        log('Vault auto-locked (idle timeout).', 'info');
+      }
+    }, 5000);
+  </script>
+</body>
+</html>

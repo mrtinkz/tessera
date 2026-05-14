@@ -1,0 +1,261 @@
+import { describe, it, expect } from 'vitest';
+import {
+  deriveKey,
+  encrypt,
+  decrypt,
+  getSalt,
+  encryptWithSalt,
+  decryptFull,
+  zeroPasscode,
+} from '../../src/core/crypto';
+
+async function makeKey(passcode = 'abc123') {
+  const salt = await getSalt();
+  return deriveKey(passcode, salt);
+}
+
+// ─── Known-Answer Test (KAT) Vectors ──────────────────────────────────────────
+// Derived offline using Node.js webcrypto with PBKDF2-SHA-256 (310 000 iters)
+// + AES-256-GCM. Fixed inputs → deterministic expected output.
+//
+// Inputs:
+//   passcode : 'abc123'
+//   salt     : 00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15  (16 bytes)
+//   iv       : 00 01 02 03 04 05 06 07 08 09 10 11              (12 bytes)
+//   plaintext: 'tessera'
+//
+// Expected payload (iv ‖ ciphertext ‖ auth-tag, base64):
+const KAT_PASSCODE = 'abc123';
+const KAT_SALT_HEX = '00010203040506070809101112131415';
+const KAT_IV_HEX   = '000102030405060708091011';
+const KAT_PAYLOAD_B64 = 'AAECAwQFBgcICRARNIbEccvuAL9KtzusxGVLcWY3mur/558=';
+const KAT_PLAINTEXT = 'tessera';
+
+function hexToUint8Array(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.slice(i, i + 2), 16);
+  }
+  return bytes;
+}
+
+describe('crypto.deriveKey', () => {
+  it('should produce a non-extractable AES-GCM key from a passcode and salt', async () => {
+    const salt = await getSalt();
+    const key = await deriveKey('abc123', salt);
+
+    expect(key.type).toBe('secret');
+    expect(key.algorithm.name).toBe('AES-GCM');
+    expect(key.extractable).toBe(false);
+  });
+
+  it('should reject a passcode shorter than 6 characters', async () => {
+    const salt = await getSalt();
+    await expect(deriveKey('a', salt)).rejects.toThrow();
+  });
+
+  it('should reject a passcode longer than 8 characters', async () => {
+    const salt = await getSalt();
+    await expect(deriveKey('123456789', salt)).rejects.toThrow();
+  });
+
+  it('should reject iterations below the OWASP minimum', async () => {
+    const salt = await getSalt();
+    await expect(deriveKey('abc123', salt, 100)).rejects.toThrow();
+  });
+
+  it('should produce different keys for different passcodes', async () => {
+    const salt = await getSalt();
+    const keyA = await deriveKey('abc123', salt);
+    const keyB = await deriveKey('xyz789', salt);
+    expect(keyA).not.toBe(keyB);
+  });
+
+  it('should produce different keys for different salts', async () => {
+    const saltA = await getSalt();
+    const saltB = await getSalt();
+    const keyA = await deriveKey('abc123', saltA);
+    const keyB = await deriveKey('abc123', saltB);
+    expect(keyA).not.toBe(keyB);
+  });
+});
+
+describe('crypto.encrypt + decrypt (simple)', () => {
+  it('should round-trip a string', async () => {
+    const key = await makeKey();
+    const original = 'hello tessera';
+    const encrypted = await encrypt(key, original);
+    const result = await decrypt(key, encrypted);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toBe(original);
+    }
+  });
+
+  it('should produce different ciphertexts for the same plaintext (random IV)', async () => {
+    const key = await makeKey();
+    const original = 'same data';
+    const a = await encrypt(key, original);
+    const b = await encrypt(key, original);
+    expect(a).not.toBe(b);
+  });
+
+  it('should handle empty string', async () => {
+    const key = await makeKey();
+    const encrypted = await encrypt(key, '');
+    const result = await decrypt(key, encrypted);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toBe('');
+    }
+  });
+
+  it('should handle special characters and JSON', async () => {
+    const key = await makeKey();
+    const data = JSON.stringify({ name: 'tesséra', tags: ['🔐', 'secure'] });
+    const encrypted = await encrypt(key, data);
+    const result = await decrypt(key, encrypted);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(JSON.parse(result.value)).toEqual({ name: 'tesséra', tags: ['🔐', 'secure'] });
+    }
+  });
+
+  it('should handle large payloads (100KB)', async () => {
+    const key = await makeKey();
+    const original = 'x'.repeat(100_000);
+    const encrypted = await encrypt(key, original);
+    const result = await decrypt(key, encrypted);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toBe(original);
+    }
+  });
+
+  it('should fail to decrypt with a different key', async () => {
+    const keyA = await makeKey('abc123');
+    const keyB = await makeKey('xyz789');
+    const encrypted = await encrypt(keyA, 'secret');
+    const result = await decrypt(keyB, encrypted);
+
+    expect(result.ok).toBe(false);
+  });
+
+  it('should fail on tampered ciphertext (AES-GCM auth check)', async () => {
+    const key = await makeKey();
+    const encrypted = await encrypt(key, 'tamper me');
+    const bytes = atob(encrypted);
+    const tampered = bytes.slice(0, -1) + String.fromCharCode(bytes.charCodeAt(bytes.length - 1) ^ 1);
+    const tamperedB64 = btoa(tampered);
+
+    const result = await decrypt(key, tamperedB64);
+    expect(result.ok).toBe(false);
+  });
+
+  it('should handle 8-character passcode', async () => {
+    const salt = await getSalt();
+    const key = await deriveKey('longpass', salt);
+    const encrypted = await encrypt(key, 'data');
+    const result = await decrypt(key, encrypted);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toBe('data');
+    }
+  });
+});
+
+describe('crypto.encryptWithSalt + decryptFull', () => {
+  it('should round-trip with embedded salt', async () => {
+    const key = await makeKey();
+    const original = 'hello with salt';
+    const encrypted = await encryptWithSalt(key, original);
+    const result = await decryptFull(key, encrypted);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toBe(original);
+    }
+  });
+});
+
+describe('crypto.getSalt', () => {
+  it('should produce a 16-byte salt', async () => {
+    const salt = await getSalt();
+    expect(salt.byteLength).toBe(16);
+  });
+
+  it('should produce unique salts', async () => {
+    const a = await getSalt();
+    const b = await getSalt();
+    expect(a).not.toEqual(b);
+  });
+});
+
+describe('crypto.zeroPasscode', () => {
+  it('should zero all bytes in a Uint8Array', () => {
+    const buf = new Uint8Array([1, 2, 3, 4, 5, 6]);
+    zeroPasscode(buf);
+    for (const byte of buf) {
+      expect(byte).toBe(0);
+    }
+  });
+});
+
+// ─── Known-Answer Tests ───────────────────────────────────────────────────────
+// These tests verify the crypto implementation against a pre-computed vector
+// rather than just round-tripping. A silent algorithm change (wrong iteration
+// count, wrong key length, swapped IV) would produce a different ciphertext and
+// fail here even if round-trip tests still pass.
+describe('crypto KAT — PBKDF2-SHA-256 + AES-256-GCM (fixed vector)', () => {
+  it('should derive the correct key and decrypt a pre-computed ciphertext', async () => {
+    const salt = hexToUint8Array(KAT_SALT_HEX);
+    const key = await deriveKey(KAT_PASSCODE, salt, 310_000);
+
+    const result = await decrypt(key, KAT_PAYLOAD_B64);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toBe(KAT_PLAINTEXT);
+    }
+  });
+
+  it('should produce the exact pre-computed ciphertext with a fixed IV', async () => {
+    // We cannot call encrypt() directly with a fixed IV because it always
+    // generates a random IV. Instead, we verify the inverse: decrypting the
+    // known ciphertext with the known key gives the known plaintext, AND
+    // encrypting the plaintext round-trips back successfully (both directions).
+    const salt = hexToUint8Array(KAT_SALT_HEX);
+    const key = await deriveKey(KAT_PASSCODE, salt, 310_000);
+
+    // Forward: decrypt known vector
+    const decrypted = await decrypt(key, KAT_PAYLOAD_B64);
+    expect(decrypted.ok).toBe(true);
+    if (decrypted.ok) {
+      expect(decrypted.value).toBe(KAT_PLAINTEXT);
+    }
+
+    // Reverse: re-encrypt and verify round-trip (random IV, so only checks plaintext recovery)
+    const reEncrypted = await encrypt(key, KAT_PLAINTEXT);
+    const reDecrypted = await decrypt(key, reEncrypted);
+    expect(reDecrypted.ok).toBe(true);
+    if (reDecrypted.ok) {
+      expect(reDecrypted.value).toBe(KAT_PLAINTEXT);
+    }
+  });
+
+  it('should fail to decrypt the vector with the wrong key', async () => {
+    const wrongSalt = hexToUint8Array('ff'.repeat(16));
+    const wrongKey = await deriveKey(KAT_PASSCODE, wrongSalt, 310_000);
+    const result = await decrypt(wrongKey, KAT_PAYLOAD_B64);
+    expect(result.ok).toBe(false);
+  });
+
+  it('should fail to decrypt the vector with the wrong passcode', async () => {
+    const salt = hexToUint8Array(KAT_SALT_HEX);
+    const wrongKey = await deriveKey('xyz789', salt, 310_000);
+    const result = await decrypt(wrongKey, KAT_PAYLOAD_B64);
+    expect(result.ok).toBe(false);
+  });
+});

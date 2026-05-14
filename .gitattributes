@@ -1,0 +1,22 @@
+# Exclude planning/progress docs from GitHub language stats and diffs.
+# These are project-management files, not part of the library source.
+PLAN.md         linguist-generated=true  export-ignore
+PROGRESS.md     linguist-generated=true  export-ignore
+
+# Exclude the manual-test example from git exports (npm pack uses .npmignore,
+# not .gitattributes, so this is for `git archive` / GitHub zip downloads only).
+example/        export-ignore
+
+# Normalise line endings to LF in the repository.
+*               text=auto eol=lf
+*.ts            text eol=lf
+*.tsx           text eol=lf
+*.json          text eol=lf
+*.md            text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+
+# Binary files — never diff or merge.
+*.png           binary
+*.jpg           binary
+*.ico           binary
