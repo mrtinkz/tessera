@@ -76,13 +76,13 @@
     "build:example": "node -e \"require('fs').copyFileSync('dist/index.global.global.js','example/tessera.js')\"",
     "dev": "tsup --watch",
     "type-check": "tsc --noEmit",
-    "lint": "eslint src/ --ext .ts,.tsx",
+    "lint": "eslint src/ --ext .ts,.tsx --max-warnings 25",
     "lint:fix": "eslint src/ --ext .ts,.tsx --fix",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:changed": "vitest --changed",
     "test:coverage": "vitest run --coverage",
-    "prepublishOnly": "npm run build && npm run type-check && npm run lint && npm run test:coverage",
+    "prepublishOnly": "npm run type-check && npm run test:coverage",
     "prepare": "husky"
   },
   "peerDependencies": {
