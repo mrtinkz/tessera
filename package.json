@@ -2,6 +2,10 @@
   "name": "@mrtinkz/tessera",
   "version": "0.1.0",
   "description": "One passcode. Your browser storage, encrypted. Zero dependencies.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mrtinkz/tessera"
+  },
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.cjs",
