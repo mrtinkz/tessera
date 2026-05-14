@@ -5,10 +5,14 @@ It is a self-contained browser demo that uses the local `dist/` build.
 
 ## How to run
 
-1. Build tessera from the project root:
+1. Install and build from the project root:
    ```bash
+   npm install --legacy-peer-deps
    npm run build
    ```
+   This generates `dist/` and copies the IIFE bundle to `example/tessera.js`.
+   The `tessera.js` file is gitignored — it must be built locally before opening
+   the example.
 
 2. **Serve over HTTP** (required for cookie testing):
    ```bash
