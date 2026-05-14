@@ -1,6 +1,6 @@
 {
-  "name": "tessera",
-  "version": "0.1.1",
+  "name": "@mrtinkz/tessera",
+  "version": "0.1.0",
   "description": "One passcode. Your browser storage, encrypted. Zero dependencies.",
   "license": "MIT",
   "type": "module",

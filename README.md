@@ -9,7 +9,7 @@ user-supplied 6–8 character passcode. No server round-trips. No cloud keys.
 No external dependencies.
 
 ```ts
-import { Tessera } from 'tessera';
+import { Tessera } from '@mrtinkz/tessera';
 
 const vault = await Tessera.unlock('abc123');
 await vault.local.setItem('cart', JSON.stringify(cartData));
@@ -37,7 +37,7 @@ vault.lock(); // zero the in-memory key
 ## Installation
 
 ```bash
-npm install tessera
+npm install @mrtinkz/tessera
 ```
 
 ---
@@ -47,7 +47,7 @@ npm install tessera
 ### Vanilla JS / TypeScript
 
 ```ts
-import { Tessera } from 'tessera';
+import { Tessera } from '@mrtinkz/tessera';
 
 // Unlock — derives key once per session
 const vault = await Tessera.unlock('abc123', {
@@ -84,8 +84,8 @@ vault.isLocked(); // true
 ```tsx
 // 'use client' is required for Next.js App Router
 'use client';
-import { useTessera } from 'tessera/react';
-import { renderPinPad } from 'tessera';
+import { useTessera } from '@mrtinkz/tessera/react';
+import { renderPinPad } from '@mrtinkz/tessera';
 
 function SecureApp() {
   const { vault, isLocked, unlock, lock } = useTessera({ idleTimeout: 600_000 });
@@ -108,8 +108,8 @@ function SecureApp() {
 
 ```vue
 <script setup lang="ts">
-import { useTessera } from 'tessera/vue';
-import { renderPinPad } from 'tessera';
+import { useTessera } from '@mrtinkz/tessera/vue';
+import { renderPinPad } from '@mrtinkz/tessera';
 import { ref, onMounted } from 'vue';
 
 const { vault, isLocked, unlock, lock } = useTessera({ idleTimeout: 600_000 });
@@ -133,8 +133,8 @@ onMounted(() => {
 ```svelte
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { tesseraStore } from 'tessera/svelte';
-  import { renderPinPad } from 'tessera';
+  import { tesseraStore } from '@mrtinkz/tessera/svelte';
+  import { renderPinPad } from '@mrtinkz/tessera';
 
   const { vault, isLocked, unlock, lock } = tesseraStore({ idleTimeout: 600_000 });
   let pinEl: HTMLDivElement;
@@ -155,7 +155,7 @@ onMounted(() => {
 
 ```typescript
 // app.module.ts
-import { TesseraModule } from 'tessera/angular';
+import { TesseraModule } from '@mrtinkz/tessera/angular';
 
 @NgModule({
   imports: [TesseraModule.forRoot({ idleTimeout: 600_000 })],
@@ -163,7 +163,7 @@ import { TesseraModule } from 'tessera/angular';
 export class AppModule {}
 
 // component
-import { TesseraService } from 'tessera/angular';
+import { TesseraService } from '@mrtinkz/tessera/angular';
 
 @Component({ ... })
 export class MyComponent {
@@ -182,7 +182,7 @@ export class MyComponent {
   The IIFE global is TesseraLib (the module namespace).
   Destructure the exports you need.
 -->
-<script src="https://cdn.jsdelivr.net/npm/tessera/dist/index.global.global.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mrtinkz/tessera/dist/index.global.global.js"></script>
 <script>
   const { Tessera, renderPinPad } = TesseraLib;
 
@@ -201,7 +201,7 @@ click-sequence recording (threat T3). Digit positions are randomised on
 every render; no DOM element carries a digit value.
 
 ```ts
-import { renderPinPad } from 'tessera';
+import { renderPinPad } from '@mrtinkz/tessera';
 
 const cleanup = renderPinPad(document.getElementById('pin')!, {
   onUnlock: async (passcode) => {
