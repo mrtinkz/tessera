@@ -86,16 +86,16 @@ export const Tessera = {
       let salt: Uint8Array;
       try {
         const stored = localStorage.getItem(SALT_STORAGE_KEY);
-        if (stored !== null) {
+        if (stored === null) {
+          // First unlock — generate, persist, and use a fresh salt.
+          salt = await getSalt();
+          const binary = [...salt].map((b) => String.fromCodePoint(b)).join('');
+          localStorage.setItem(SALT_STORAGE_KEY, btoa(binary));
+        } else {
           // Reuse the stored salt so the same passcode re-derives the same key.
           const raw = atob(stored);
           salt = new Uint8Array(raw.length);
-          for (let i = 0; i < raw.length; i++) salt[i] = raw.charCodeAt(i);
-        } else {
-          // First unlock — generate, persist, and use a fresh salt.
-          salt = await getSalt();
-          const binary = Array.from(salt).map((b) => String.fromCodePoint(b)).join('');
-          localStorage.setItem(SALT_STORAGE_KEY, btoa(binary));
+          for (let i = 0; i < raw.length; i++) salt[i] = raw.codePointAt(i)!;
         }
       } catch {
         // localStorage unavailable (private browsing restriction, etc.) —
