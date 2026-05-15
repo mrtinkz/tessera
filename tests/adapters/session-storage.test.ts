@@ -1,9 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import 'fake-indexeddb/auto';
 import { SessionStorageAdapter } from '../../src/adapters/session-storage';
+import { IndexedDbAdapter } from '../../src/adapters/indexed-db';
 import { KeySession } from '../../src/core/session';
-import { deriveKey, deriveHmacKey, getSalt } from '../../src/core/crypto';
+import { deriveKey, deriveHmacKey, getSalt, encryptWithSalt } from '../../src/core/crypto';
 import { resolveConfig } from '../../src/core/config';
 import { TesseraEmitter } from '../../src/core/events';
+import { SuspicionEngine } from '../../src/core/suspicion';
 
 let session: KeySession;
 
@@ -24,6 +27,7 @@ describe('SessionStorageAdapter', () => {
 
   afterEach(() => {
     session.reset();
+    vi.restoreAllMocks();
   });
 
   it('should encrypt and decrypt values', async () => {
@@ -78,5 +82,344 @@ describe('SessionStorageAdapter', () => {
     await adapter.setItem('key', 'value');
     session.lock();
     expect(await adapter.getItem('key')).toBeNull();
+  });
+
+  // TTL expiry
+  it('should return null and remove item when TTL has expired', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('ttl-key', 'val', { ttl: 1 });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(await adapter.getItem('ttl-key')).toBeNull();
+  });
+
+  it('should emit key-expired event on TTL expiry', async () => {
+    const events = new TesseraEmitter();
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, events);
+    const handler = vi.fn();
+    events.on('key-expired', handler);
+    await adapter.setItem('ttl-ev', 'data', { ttl: 1 });
+    await new Promise((r) => setTimeout(r, 10));
+    await adapter.getItem('ttl-ev');
+    expect(handler).toHaveBeenCalled();
+  });
+
+  // maxReads
+  it('should return null when maxReads is exhausted', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('mr-key', 'value', { maxReads: 1 });
+    const first = await adapter.getItem('mr-key');
+    expect(first).toBe('value');
+    const second = await adapter.getItem('mr-key');
+    expect(second).toBeNull();
+  });
+
+  it('should emit max-reads-reached event', async () => {
+    const events = new TesseraEmitter();
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, events);
+    const handler = vi.fn();
+    events.on('max-reads-reached', handler);
+    await adapter.setItem('mr-ev', 'data', { maxReads: 1 });
+    await adapter.getItem('mr-ev'); // first read ok
+    await adapter.getItem('mr-ev'); // second triggers event
+    expect(handler).toHaveBeenCalled();
+  });
+
+  // halfLife hard
+  it('should return null when halfLife.hard has elapsed', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('hl-hard', 'v', { halfLife: { hard: 1 } });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(await adapter.getItem('hl-hard')).toBeNull();
+  });
+
+  // halfLife soft
+  it('should return null when halfLife.soft has elapsed and no reconfirm key', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('hl-soft', 'v', { halfLife: { soft: 1 } });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(await adapter.getItem('hl-soft')).toBeNull();
+  });
+
+  it('should emit reconfirmation-required on soft half-life expiry', async () => {
+    const events = new TesseraEmitter();
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, events);
+    const handler = vi.fn();
+    events.on('reconfirmation-required', handler);
+    await adapter.setItem('hl-soft-ev', 'v', { halfLife: { soft: 1 } });
+    await new Promise((r) => setTimeout(r, 10));
+    await adapter.getItem('hl-soft-ev');
+    expect(handler).toHaveBeenCalled();
+  });
+
+  // Legacy format: no dot in stored value
+  it('should decrypt a legacy-format value stored without metadata', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    const cryptoKey = session.getKey();
+    const legacyEncrypted = await encryptWithSalt(cryptoKey, 'legacy-val');
+    const rawKey = await session.rotateKeyName('legacy-key');
+    sessionStorage.setItem(rawKey, legacyEncrypted);
+
+    const result = await adapter.getItem('legacy-key');
+    expect(result).toBe('legacy-val');
+  });
+
+  // Legacy format: corrupt (no dot, not valid ciphertext)
+  it('should return null for corrupt legacy-format value', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    const rawKey = await session.rotateKeyName('corrupt-legacy');
+    sessionStorage.setItem(rawKey, 'NOTVALIDENCRYPTED!!');
+    expect(await adapter.getItem('corrupt-legacy')).toBeNull();
+  });
+
+  // meta HMAC failure (corrupt meta part before the dot)
+  it('should emit hmac-failure and remove item when meta decryption fails', async () => {
+    const events = new TesseraEmitter();
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, events);
+    const handler = vi.fn();
+    events.on('hmac-failure', handler);
+
+    await adapter.setItem('meta-corrupt', 'val');
+    const rawKey = await adapter.getRawKey!('meta-corrupt');
+    const stored = sessionStorage.getItem(rawKey)!;
+    const dotIdx = stored.indexOf('.');
+    sessionStorage.setItem(rawKey, 'INVALIDBASE64GARBAGE==' + stored.slice(dotIdx));
+
+    const result = await adapter.getItem('meta-corrupt');
+    expect(result).toBeNull();
+    expect(handler).toHaveBeenCalled();
+  });
+
+  // applyOnSuspicion – lock
+  it('should lock session when onSuspicion is "lock" and value HMAC fails', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('sus-lock', 'secure', { onSuspicion: 'lock' });
+    const rawKey = await adapter.getRawKey!('sus-lock');
+    const stored = sessionStorage.getItem(rawKey)!;
+    const dotIdx = stored.indexOf('.');
+    sessionStorage.setItem(rawKey, stored.slice(0, dotIdx + 1) + 'INVALIDBASE64GARBAGE==');
+    await adapter.getItem('sus-lock');
+    expect(session.isLocked()).toBe(true);
+  });
+
+  // applyOnSuspicion – throw (key intact)
+  it('should leave key intact when onSuspicion is "throw" and value HMAC fails', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('sus-throw', 'secure', { onSuspicion: 'throw' });
+    const rawKey = await adapter.getRawKey!('sus-throw');
+    const stored = sessionStorage.getItem(rawKey)!;
+    const dotIdx = stored.indexOf('.');
+    sessionStorage.setItem(rawKey, stored.slice(0, dotIdx + 1) + 'INVALIDBASE64GARBAGE==');
+    expect(await adapter.getItem('sus-throw')).toBeNull();
+    expect(sessionStorage.getItem(rawKey)).not.toBeNull();
+  });
+
+  // applyOnSuspicion – wipe (default)
+  it('should wipe key when onSuspicion is "wipe" and value HMAC fails', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('sus-wipe', 'secure', { onSuspicion: 'wipe' });
+    const rawKey = await adapter.getRawKey!('sus-wipe');
+    const stored = sessionStorage.getItem(rawKey)!;
+    const dotIdx = stored.indexOf('.');
+    sessionStorage.setItem(rawKey, stored.slice(0, dotIdx + 1) + 'INVALIDBASE64GARBAGE==');
+    expect(await adapter.getItem('sus-wipe')).toBeNull();
+    expect(sessionStorage.getItem(rawKey)).toBeNull();
+  });
+
+  // split mode write + read
+  it('should write and read in split mode with idb adapter', async () => {
+    const config = resolveConfig();
+    const events = new TesseraEmitter();
+    const idbAdapter = new IndexedDbAdapter(config, session, events);
+    const adapter = new SessionStorageAdapter(config, session, events);
+    adapter.setIdbAdapter(idbAdapter);
+
+    await adapter.setItem('split-key', 'split-value', { mode: 'split' });
+    const result = await adapter.getItem('split-key');
+    expect(result).toBe('split-value');
+  });
+
+  // claim mode write + read
+  it('should write and read in claim mode with idb adapter', async () => {
+    const config = resolveConfig();
+    const events = new TesseraEmitter();
+    const idbAdapter = new IndexedDbAdapter(config, session, events);
+    const adapter = new SessionStorageAdapter(config, session, events);
+    adapter.setIdbAdapter(idbAdapter);
+
+    await adapter.setItem('claim-key', 'claim-value', { mode: 'claim' });
+    const result = await adapter.getItem('claim-key');
+    expect(result).toBe('claim-value');
+  });
+
+  // Rate limit 1.5x exceeded → getItem returns null (covers session-storage.ts lines 63-70)
+  it('should return null when suspicion rate limit is exceeded above 1.5x threshold', async () => {
+    const config = resolveConfig({
+      suspicion: {
+        rateLimit: { callsPerSecond: 2, scorePerExcess: 1 },
+        thresholds: { lockdown: 10_000 },
+      },
+    });
+    const events = new TesseraEmitter();
+    const suspicion = new SuspicionEngine(config, events);
+    const adapter = new SessionStorageAdapter(config, session, events, suspicion);
+    await adapter.setItem('rate-ss-key', 'rate-val');
+
+    let finalResult: string | null = null;
+    for (let i = 0; i < 5; i++) {
+      finalResult = await adapter.getItem('rate-ss-key');
+    }
+    expect(finalResult).toBeNull();
+    suspicion.destroy();
+  });
+
+  // honeyManager.isHoney returning true for session → returns null (covers lines 78-80)
+  it('should return null and record honey hit when session-storage key is a honey key', async () => {
+    const events = new TesseraEmitter();
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, events);
+    const honeyMgr = {
+      isEnabled: false,
+      allKeys: () => [] as string[],
+      generateHoneyKeys: () => [] as string[],
+      isHoney: (_backend: string, _key: string) => true,
+      remove: () => {},
+      clearBackend: () => {},
+    };
+    adapter.setHoneyManager(honeyMgr);
+    await adapter.setItem('honey-ss-test', 'honey-val');
+    const result = await adapter.getItem('honey-ss-test');
+    expect(result).toBeNull();
+  });
+
+  // removeItem: claim mode with idb adapter cleans up the IDB claim (lines 132-134)
+  it('should remove the IDB claim when removeItem is called on a claim-mode item', async () => {
+    const config = resolveConfig();
+    const events = new TesseraEmitter();
+    const idbAdapter = new IndexedDbAdapter(config, session, events);
+    const adapter = new SessionStorageAdapter(config, session, events);
+    adapter.setIdbAdapter(idbAdapter);
+
+    await adapter.setItem('claim-remove', 'claim-val', { mode: 'claim' });
+    await adapter.removeItem('claim-remove');
+    // After removal, reading the claim returns null
+    const result = await adapter.getItem('claim-remove');
+    expect(result).toBeNull();
+  });
+
+  // split mode returns null without idb
+  it('should return null for split mode without an idb adapter', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    // Force a split: prefix into sessionStorage manually
+    const rawKey = await session.rotateKeyName('split-no-idb');
+    sessionStorage.setItem(rawKey, 'split:SOMEGARBAGEDATA');
+    const result = await adapter.getItem('split-no-idb');
+    expect(result).toBeNull();
+  });
+
+  // readCount NaN branch: inject a metadata with non-finite readCount
+  it('should normalise non-finite readCount in metadata', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    const cryptoKey = session.getKey();
+    const meta = JSON.stringify({
+      writeTime: Date.now(),
+      readCount: Number.NaN,
+      sensitivity: 'low',
+      onSuspicion: 'wipe',
+    });
+    const encMeta = await encryptWithSalt(cryptoKey, meta);
+    const encVal = await encryptWithSalt(cryptoKey, 'nan-count-val');
+    const rawKey = await session.rotateKeyName('nan-count');
+    sessionStorage.setItem(rawKey, `${encMeta}.${encVal}`);
+    const result = await adapter.getItem('nan-count');
+    expect(result).toBe('nan-count-val');
+  });
+
+  // clear() with honeyManager that has clearBackend (covers lines 191-192)
+  it('should call clearBackend on honeyManager when clearing', async () => {
+    const clearBackendMock = vi.fn();
+    const fakeMgr = {
+      isEnabled: true,
+      allKeys: () => [] as string[],
+      generateHoneyKeys: (_b: string, _e: string[], n: number) =>
+        Array.from({ length: n }, (_, i) => `h_${i}`),
+      isHoney: () => false,
+      remove: () => {},
+      clearBackend: clearBackendMock,
+    };
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    adapter.setHoneyManager(fakeMgr);
+    await adapter.clear();
+    expect(clearBackendMock).toHaveBeenCalledWith('session');
+  });
+
+  // wipeHighSensitivity JSON.parse catch branch (lines 168-169)
+  it('should skip items with non-JSON meta during wipeHighSensitivity', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('valid-high', 'val', { sensitivity: 'high' });
+
+    // Inject a t_ prefixed item whose meta is valid ciphertext but not JSON
+    const cryptoKey = session.getKey();
+    const nonJsonMeta = await encryptWithSalt(cryptoKey, 'NOT-JSON {{{');
+    const encVal = await encryptWithSalt(cryptoKey, 'ignored');
+    sessionStorage.setItem('t_badfakekeyAAAAAAAAAAAAAAAAAAAA', `${nonJsonMeta}.${encVal}`);
+
+    const wiped: string[] = [];
+    await adapter.wipeHighSensitivity(wiped);
+    // The valid high-sensitivity item is wiped (non-JSON item is silently skipped)
+    expect(wiped.some((w) => w.includes('session:'))).toBe(true);
+  });
+
+  // wipeHighSensitivity
+  it('should wipe high-sensitivity items via wipeHighSensitivity', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('low', 'lo-val', { sensitivity: 'low' });
+    await adapter.setItem('high', 'hi-val', { sensitivity: 'high' });
+    const wiped: string[] = [];
+    await adapter.wipeHighSensitivity(wiped);
+    expect(wiped.some((w) => w.includes('session:'))).toBe(true);
+    expect(await adapter.getItem('high')).toBeNull();
+    expect(await adapter.getItem('low')).toBe('lo-val');
+  });
+
+  // addHoneyKeys: needed <= 0 branch (honey manager already has enough keys for the backend)
+  it('should skip honey key generation when needed count is already satisfied', async () => {
+    const config = resolveConfig({ honeyKeys: { count: 2 } } as Parameters<
+      typeof resolveConfig
+    >[0]);
+    const { HoneyKeyManager } = await import('../../src/storage/honey');
+    const mgr = new HoneyKeyManager(config);
+    const adapter = new SessionStorageAdapter(config, session, new TesseraEmitter());
+    adapter.setHoneyManager(mgr);
+
+    // First setItem: generates 2 honey keys (needed = 2 - 0 = 2)
+    await adapter.setItem('hk-first', 'v1');
+    const keysAfterFirst = mgr.allKeys('session').length;
+    expect(keysAfterFirst).toBe(2);
+
+    // Second setItem: needed = 2 - 2 = 0 → takes the 'needed <= 0' early return path
+    await adapter.setItem('hk-second', 'v2');
+    // Honey key count should remain 2 (no new keys generated)
+    expect(mgr.allKeys('session').length).toBe(2);
+  });
+
+  // addHoneyKeys: set a honey manager that is enabled with count > 0
+  it('should add honey keys when honey manager is enabled', async () => {
+    const fakeMgr = {
+      isEnabled: true,
+      allKeys: (_backend: string) => [] as string[],
+      generateHoneyKeys: (_backend: string, _existing: string[], needed: number) =>
+        Array.from({ length: needed }, (_, i) => `honey_${i}`),
+      isHoney: () => false,
+      remove: () => {},
+      clearBackend: () => {},
+    };
+    // Override config to request 2 honey keys
+    const config = resolveConfig({ honeyKeys: { count: 2 } } as Parameters<
+      typeof resolveConfig
+    >[0]);
+    const adapterWithHoney = new SessionStorageAdapter(config, session, new TesseraEmitter());
+    adapterWithHoney.setHoneyManager(fakeMgr);
+    await adapterWithHoney.setItem('h-key', 'h-val');
+    // Honey keys should appear in sessionStorage
+    expect(sessionStorage.getItem('honey_0')).not.toBeNull();
   });
 });

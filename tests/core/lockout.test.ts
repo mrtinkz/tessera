@@ -1,17 +1,24 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import {
   recordFailedAttempt,
   checkLockout,
   resetLockout,
   getRemainingAttempts,
   performWipe,
+  signLockoutRecord,
+  verifyLockoutRecord,
 } from '../../src/core/lockout';
+import { deriveHmacKey, getSalt } from '../../src/core/crypto';
 
 describe('lockout', () => {
   beforeEach(() => {
     resetLockout();
     localStorage.clear();
     sessionStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('should start with full attempts remaining', () => {
@@ -91,5 +98,131 @@ describe('lockout', () => {
     // Should not throw — falls back to default record
     expect(() => recordFailedAttempt(5)).not.toThrow();
     expect(getRemainingAttempts(5)).toBe(4);
+  });
+
+  it('signLockoutRecord stores a hex signature in localStorage', async () => {
+    const salt = await getSalt();
+    const hmacKey = await deriveHmacKey('246813', salt);
+    await signLockoutRecord(hmacKey);
+    expect(localStorage.getItem('tessera_lockout_sig')).not.toBeNull();
+    expect(localStorage.getItem('tessera_lockout_sig')).toMatch(/^[\da-f]+$/);
+  });
+
+  it('verifyLockoutRecord returns true when no signature exists', async () => {
+    const salt = await getSalt();
+    const hmacKey = await deriveHmacKey('246813', salt);
+    localStorage.removeItem('tessera_lockout_sig');
+    const result = await verifyLockoutRecord(hmacKey);
+    expect(result).toBe(true);
+  });
+
+  it('verifyLockoutRecord returns true for intact record', async () => {
+    const salt = await getSalt();
+    const hmacKey = await deriveHmacKey('246813', salt);
+    await signLockoutRecord(hmacKey);
+    const result = await verifyLockoutRecord(hmacKey);
+    expect(result).toBe(true);
+  });
+
+  it('verifyLockoutRecord returns false for tampered record', async () => {
+    const salt = await getSalt();
+    const hmacKey = await deriveHmacKey('246813', salt);
+    await signLockoutRecord(hmacKey);
+    // Tamper with the lockout record
+    localStorage.setItem(
+      'tessera_lockout',
+      JSON.stringify({ attempts: 99, lockedUntil: null, backoffMs: 1000 }),
+    );
+    const result = await verifyLockoutRecord(hmacKey);
+    expect(result).toBe(false);
+  });
+
+  it('verifyLockoutRecord returns false for malformed signature', async () => {
+    const salt = await getSalt();
+    const hmacKey = await deriveHmacKey('246813', salt);
+    localStorage.setItem('tessera_lockout_sig', 'not-valid-hex!!!');
+    const result = await verifyLockoutRecord(hmacKey);
+    expect(result).toBe(false);
+  });
+
+  it('performWipe when no lockout record exists (null path)', () => {
+    localStorage.clear();
+    // No lockout record → the lockoutRecord branch is null
+    expect(() => performWipe()).not.toThrow();
+  });
+
+  // Covers lockout.ts line 31: catch block in writeRecord() when localStorage.setItem throws
+  it('writeRecord (via recordFailedAttempt) does not throw when localStorage.setItem throws', () => {
+    vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new Error('Storage quota exceeded');
+    });
+    // recordFailedAttempt calls writeRecord which calls localStorage.setItem
+    expect(() => recordFailedAttempt(5)).not.toThrow();
+  });
+
+  // Covers lockout.ts line 63: catch in signLockoutRecord when localStorage.setItem throws
+  it('signLockoutRecord does not throw when localStorage.setItem throws', async () => {
+    const salt = await getSalt();
+    const hmacKey = await deriveHmacKey('246813', salt);
+    vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new Error('Storage unavailable');
+    });
+    await expect(signLockoutRecord(hmacKey)).resolves.toBeUndefined();
+  });
+
+  // Covers lockout.ts line 77: catch in verifyLockoutRecord when localStorage.getItem throws
+  it('verifyLockoutRecord returns true when localStorage.getItem throws', async () => {
+    const salt = await getSalt();
+    const hmacKey = await deriveHmacKey('246813', salt);
+    vi.spyOn(localStorage, 'getItem').mockImplementation((key: string) => {
+      if (key === 'tessera_lockout_sig') throw new Error('Storage unavailable');
+      return null;
+    });
+    const result = await verifyLockoutRecord(hmacKey);
+    expect(result).toBe(true);
+  });
+
+  // Covers lockout.ts line 179: catch block when localStorage.clear throws
+  it('performWipe does not throw when localStorage.clear throws', () => {
+    vi.spyOn(localStorage, 'clear').mockImplementation(() => {
+      throw new Error('Storage unavailable');
+    });
+    // Should swallow the error and not throw
+    expect(() => performWipe()).not.toThrow();
+  });
+
+  // Covers lockout.ts line 191: catch block when document.cookie getter throws
+  it('performWipe does not throw when document.cookie access throws', () => {
+    vi.spyOn(localStorage, 'clear').mockImplementation(() => {}); // let storage succeed
+    const origDescriptor =
+      Object.getOwnPropertyDescriptor(Document.prototype, 'cookie') ??
+      Object.getOwnPropertyDescriptor(document, 'cookie');
+    try {
+      Object.defineProperty(document, 'cookie', {
+        get: () => {
+          throw new Error('Cookie access denied');
+        },
+        configurable: true,
+      });
+      expect(() => performWipe()).not.toThrow();
+    } finally {
+      if (origDescriptor) Object.defineProperty(document, 'cookie', origDescriptor);
+    }
+  });
+
+  // Covers lockout.ts lines 90-91: verifyLockoutRecord catch when crypto.subtle.verify throws
+  it('verifyLockoutRecord returns false when crypto.subtle.verify throws', async () => {
+    const salt = await getSalt();
+    const hmacKey = await deriveHmacKey('246813', salt);
+    // Store a signature that is exactly the right hex-encoded length but invalid
+    // A 32-byte HMAC-SHA256 signature = 64 hex chars; store a garbage 64-char hex string
+    // crypto.subtle.verify will return false, not throw, for this.
+    // To trigger the catch, we need to make crypto.subtle.verify throw.
+    vi.spyOn(crypto.subtle, 'verify').mockRejectedValueOnce(new Error('verify failed'));
+    // Store any hex signature so the null-check passes
+    localStorage.setItem('tessera_lockout_sig', 'aabbccdd'.repeat(8)); // 64 hex chars
+    const result = await verifyLockoutRecord(hmacKey);
+    expect(result).toBe(false);
+    vi.spyOn(crypto.subtle, 'verify').mockRestore?.();
   });
 });

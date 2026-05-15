@@ -6,7 +6,7 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       thresholds: { lines: 90, branches: 90, functions: 90 },
-      exclude: ['dist/**', 'example/**', '**/*.test.ts', '*.config.ts'],
+      exclude: ['dist/**', 'example/**', '**/*.test.ts', '*.config.ts', '.claude/**'],
     },
   },
 });
