@@ -1,69 +1,72 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { KeySession, keySession } from '../../src/core/session';
+import { KeySession } from '../../src/core/session';
+
+let session: KeySession;
 
 describe('KeySession', () => {
   beforeEach(() => {
-    keySession.reset();
+    session = new KeySession();
     vi.useFakeTimers();
   });
 
   afterEach(() => {
+    session.reset();
     vi.useRealTimers();
   });
 
   it('should be locked initially', () => {
-    expect(keySession.isLocked()).toBe(true);
+    expect(session.isLocked()).toBe(true);
   });
 
   it('should accept a key and become unlocked', async () => {
     const fakeKey = {} as CryptoKey;
-    keySession.setKey(fakeKey, 900_000);
-    expect(keySession.isLocked()).toBe(false);
-    expect(keySession.getKey()).toBe(fakeKey);
+    session.setKey(fakeKey, 900_000);
+    expect(session.isLocked()).toBe(false);
+    expect(session.getKey()).toBe(fakeKey);
   });
 
   it('should lock when lock() is called', () => {
-    keySession.setKey({} as CryptoKey, 900_000);
-    keySession.lock();
-    expect(keySession.isLocked()).toBe(true);
-    expect(() => keySession.getKey()).toThrow();
+    session.setKey({} as CryptoKey, 900_000);
+    session.lock();
+    expect(session.isLocked()).toBe(true);
+    expect(() => session.getKey()).toThrow();
   });
 
   it('should auto-lock after idle timeout', () => {
-    keySession.setKey({} as CryptoKey, 10_000);
-    expect(keySession.isLocked()).toBe(false);
+    session.setKey({} as CryptoKey, 10_000);
+    expect(session.isLocked()).toBe(false);
 
     vi.advanceTimersByTime(10_001);
-    expect(keySession.isLocked()).toBe(true);
+    expect(session.isLocked()).toBe(true);
   });
 
   it('should reset the timer on touch()', () => {
-    keySession.setKey({} as CryptoKey, 10_000);
-    vi.advanceTimersByTime(5_000);
-    keySession.touch();
-    vi.advanceTimersByTime(5_000);
-    expect(keySession.isLocked()).toBe(false);
+    session.setKey({} as CryptoKey, 10_000);
+    vi.advanceTimersByTime(5000);
+    session.touch();
+    vi.advanceTimersByTime(5000);
+    expect(session.isLocked()).toBe(false);
   });
 
   it('should throw when getKey() is called without a key set', () => {
-    expect(() => keySession.getKey()).toThrow();
+    expect(() => session.getKey()).toThrow();
   });
 
   it('should reset() fully clear state', () => {
-    keySession.setKey({} as CryptoKey, 900_000);
-    keySession.reset();
-    expect(keySession.isLocked()).toBe(true);
-    expect(() => keySession.getKey()).toThrow();
+    session.setKey({} as CryptoKey, 900_000);
+    session.reset();
+    expect(session.isLocked()).toBe(true);
+    expect(() => session.getKey()).toThrow();
   });
 
   it('should return null from getKeySafe() when locked', () => {
-    keySession.setKey({} as CryptoKey, 900_000);
-    keySession.lock();
-    expect(keySession.getKeySafe()).toBeNull();
+    session.setKey({} as CryptoKey, 900_000);
+    session.lock();
+    expect(session.getKeySafe()).toBeNull();
   });
 
   it('should return null from getKeySafe() when no key set', () => {
-    expect(keySession.getKeySafe()).toBeNull();
+    expect(session.getKeySafe()).toBeNull();
   });
 
   it('should not throw when lock() is called on a fresh KeySession', () => {

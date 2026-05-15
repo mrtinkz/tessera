@@ -20,10 +20,16 @@ function assertBrowserEnvironment(): void {
 }
 
 function validatePasscode(passcode: string): void {
-  if (passcode.length < 6 || passcode.length > 8) {
+  if (passcode.length < 6) {
     throw new TesseraError(
       TesseraErrorCode.INVALID_PASSCODE,
-      'Passcode must be between 6 and 8 characters.',
+      'Passcode must be at least 6 characters.',
+    );
+  }
+  if (passcode.trim().length === 0) {
+    throw new TesseraError(
+      TesseraErrorCode.INVALID_PASSCODE,
+      'Passcode must not be entirely whitespace.',
     );
   }
 }
@@ -82,13 +88,7 @@ function getIv(): Uint8Array {
 }
 
 async function importKey(keyBuffer: BufferSource): Promise<CryptoKey> {
-  return crypto.subtle.importKey(
-    'raw',
-    keyBuffer,
-    { name: 'PBKDF2' },
-    false,
-    ['deriveKey'],
-  );
+  return crypto.subtle.importKey('raw', keyBuffer, { name: 'PBKDF2' }, false, ['deriveKey']);
 }
 
 async function deriveAesKey(
@@ -114,13 +114,13 @@ async function deriveAesKey(
  * Derives a non-extractable AES-256-GCM `CryptoKey` from a user passcode
  * using PBKDF2-SHA-256 with a cryptographically random salt.
  *
- * @param passcode   - User-supplied passcode (6–8 characters).
+ * @param passcode   - User-supplied passcode (minimum 6 characters).
  * @param salt       - 128-bit random salt, unique per stored value.
  *   Generate with {@link getSalt}.
  * @param iterations - PBKDF2 iteration count. Must be ≥ 310 000 (OWASP 2024).
  * @returns A non-extractable `CryptoKey` for AES-GCM encryption/decryption.
  * @throws {TesseraError} `UNSUPPORTED_ENV` if `crypto.subtle` is unavailable.
- * @throws {TesseraError} `INVALID_PASSCODE` if passcode length is outside 6–8.
+ * @throws {TesseraError} `INVALID_PASSCODE` if passcode is shorter than 6 characters.
  * @throws {TesseraError} `DECRYPT_FAILED` if `iterations` is below the minimum.
  *
  * @security
@@ -131,7 +131,7 @@ async function deriveAesKey(
  * @example
  * ```ts
  * const salt = await getSalt();
- * const key = await deriveKey('abc123', salt, 310_000);
+ * const key = await deriveKey('246813', salt, 310_000);
  * ```
  */
 export async function deriveKey(
@@ -168,20 +168,13 @@ export async function deriveKey(
  * @see {@link encryptWithSalt} for the storage-adapter variant that embeds a
  *   per-value salt in the payload.
  */
-export async function encrypt(
-  key: CryptoKey,
-  plaintext: string,
-): Promise<string> {
+export async function encrypt(key: CryptoKey, plaintext: string): Promise<string> {
   assertBrowserEnvironment();
 
   const iv = getIv();
   const encoded = new TextEncoder().encode(plaintext);
 
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv },
-    key,
-    encoded,
-  );
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded);
 
   const combined = concatBuffers(iv, new Uint8Array(ciphertext));
   return uint8ArrayToBase64(combined);
@@ -205,21 +198,14 @@ export async function encrypt(
  * @security Per-value salt prevents rainbow-table attacks even when two
  *   values are encrypted with the same passcode (T5).
  */
-export async function encryptWithSalt(
-  key: CryptoKey,
-  plaintext: string,
-): Promise<string> {
+export async function encryptWithSalt(key: CryptoKey, plaintext: string): Promise<string> {
   assertBrowserEnvironment();
 
   const salt = crypto.getRandomValues(new Uint8Array(SALT_LENGTH));
   const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
   const encoded = new TextEncoder().encode(plaintext);
 
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv },
-    key,
-    encoded,
-  );
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded);
 
   const combined = concatBuffers(salt, concatBuffers(iv, new Uint8Array(ciphertext)));
   return uint8ArrayToBase64(combined);
@@ -238,32 +224,31 @@ export async function encryptWithSalt(
  * @security AES-GCM authentication tag verification detects any byte-level
  *   tampering before decryption proceeds (T9).
  */
-export async function decrypt(
-  key: CryptoKey,
-  payload: string,
-): Promise<Result<string>> {
+export async function decrypt(key: CryptoKey, payload: string): Promise<Result<string>> {
   assertBrowserEnvironment();
 
   try {
     const combined = base64ToUint8Array(payload);
 
     if (combined.length < IV_LENGTH + 1) {
-      return { ok: false, error: new TesseraError(TesseraErrorCode.DECRYPT_FAILED, 'Invalid payload.') };
+      return {
+        ok: false,
+        error: new TesseraError(TesseraErrorCode.DECRYPT_FAILED, 'Invalid payload.'),
+      };
     }
 
     const iv = combined.slice(0, IV_LENGTH);
     const ciphertext = combined.slice(IV_LENGTH);
 
-    const decrypted = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv },
-      key,
-      ciphertext,
-    );
+    const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
 
     const plaintext = new TextDecoder().decode(decrypted);
     return { ok: true, value: plaintext };
   } catch (error) {
-    return { ok: false, error: new TesseraError(TesseraErrorCode.DECRYPT_FAILED, 'Decryption failed.', error) };
+    return {
+      ok: false,
+      error: new TesseraError(TesseraErrorCode.DECRYPT_FAILED, 'Decryption failed.', error),
+    };
   }
 }
 
@@ -279,32 +264,31 @@ export async function decrypt(
  * @security AES-GCM authentication tag verification detects any byte-level
  *   tampering before decryption proceeds (T9).
  */
-export async function decryptFull(
-  key: CryptoKey,
-  payload: string,
-): Promise<Result<string>> {
+export async function decryptFull(key: CryptoKey, payload: string): Promise<Result<string>> {
   assertBrowserEnvironment();
 
   try {
     const combined = base64ToUint8Array(payload);
 
     if (combined.length < SALT_LENGTH + IV_LENGTH + 1) {
-      return { ok: false, error: new TesseraError(TesseraErrorCode.DECRYPT_FAILED, 'Invalid payload.') };
+      return {
+        ok: false,
+        error: new TesseraError(TesseraErrorCode.DECRYPT_FAILED, 'Invalid payload.'),
+      };
     }
 
     const iv = combined.slice(SALT_LENGTH, SALT_LENGTH + IV_LENGTH);
     const ciphertext = combined.slice(SALT_LENGTH + IV_LENGTH);
 
-    const decrypted = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv },
-      key,
-      ciphertext,
-    );
+    const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
 
     const plaintext = new TextDecoder().decode(decrypted);
     return { ok: true, value: plaintext };
   } catch (error) {
-    return { ok: false, error: new TesseraError(TesseraErrorCode.DECRYPT_FAILED, 'Decryption failed.', error) };
+    return {
+      ok: false,
+      error: new TesseraError(TesseraErrorCode.DECRYPT_FAILED, 'Decryption failed.', error),
+    };
   }
 }
 
@@ -322,4 +306,74 @@ export function zeroPasscode(passcode: Uint8Array): void {
   for (let i = 0; i < passcode.length; i++) {
     passcode[i] = 0;
   }
+}
+
+function uint8ArrayToHex(bytes: Uint8Array): string {
+  let hex = '';
+  for (const b of bytes) {
+    hex += b.toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
+/**
+ * Derives a non-extractable HMAC-SHA256 `CryptoKey` from a user passcode
+ * using PBKDF2-SHA-256 with a domain-separated salt. Used for deterministic
+ * key-name rotation via HMAC (replaces the unsafe fixed-IV AES-GCM approach).
+ *
+ * @param passcode   - User-supplied passcode (minimum 6 characters).
+ * @param salt       - 128-bit random salt from the vault salt.
+ * @param iterations - PBKDF2 iteration count. Must be ≥ 310 000.
+ * @returns A non-extractable HMAC-SHA256 `CryptoKey`.
+ * @internal Not exported in the public API.
+ */
+export async function deriveHmacKey(
+  passcode: string,
+  salt: Uint8Array,
+  iterations: number = MIN_ITERATIONS,
+): Promise<CryptoKey> {
+  assertBrowserEnvironment();
+  validatePasscode(passcode);
+
+  // Domain-separate the salt by appending 'keynames' as UTF-8.
+  const suffix = new TextEncoder().encode('keynames');
+  const domainSalt = concatBuffers(salt, suffix);
+
+  const encoded = new TextEncoder().encode(passcode);
+  const passwordKey = await importKey(encoded);
+
+  return crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      salt: domainSalt,
+      iterations,
+      hash: 'SHA-256',
+    },
+    passwordKey,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign', 'verify'],
+  );
+}
+
+/**
+ * Produces a deterministic, opaque storage key by HMAC-SHA256-signing
+ * `'keyname:' + developerKey` with the provided HMAC key.
+ * Takes the first 32 hex chars of the 64-hex HMAC output → `t_<32hex>`.
+ *
+ * @param hmacKey      - Non-extractable HMAC-SHA256 key from {@link deriveHmacKey}.
+ * @param developerKey - The raw developer-facing key name.
+ * @returns A `t_`-prefixed 34-character opaque storage key.
+ */
+export async function rotateKeyName(hmacKey: CryptoKey, developerKey: string): Promise<string> {
+  const data = new TextEncoder().encode(`keyname:${developerKey}`);
+  const signature = await crypto.subtle.sign('HMAC', hmacKey, data);
+  const hex = uint8ArrayToHex(new Uint8Array(signature));
+  return `t_${hex.slice(0, 32)}`;
+}
+
+export async function generateHoneyCiphertext(key: CryptoKey): Promise<string> {
+  const noise = crypto.getRandomValues(new Uint8Array(32));
+  const fakePlaintext = uint8ArrayToHex(noise);
+  return encryptWithSalt(key, fakePlaintext);
 }

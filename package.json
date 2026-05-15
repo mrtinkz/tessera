@@ -1,6 +1,6 @@
 {
   "name": "@mrtinkz/tessera",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "One passcode. Your browser storage, encrypted. Zero dependencies.",
   "repository": {
     "type": "git",

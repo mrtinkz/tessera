@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { useTessera } from '../../src/framework/vue/index';
 
 // Minimal Vue composable test — mock Vue primitives to isolate adapter logic.
@@ -33,5 +33,3 @@ describe('Vue framework adapter — useTessera', () => {
     expect((result.isLocked as { value: unknown }).value).toBe(true);
   });
 });
-
-import { beforeEach } from 'vitest';

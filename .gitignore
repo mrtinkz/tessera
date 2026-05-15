@@ -7,13 +7,15 @@ Thumbs.db
 *.log
 .env
 
-# Manual-test example — not committed, not published.
+# Manual-test example files — not committed, not published.
 example/tessera.js
+example/enhancement-demo.html
 
-# Planning and progress docs — not committed.
+# Planning, progress, and design docs — not committed.
 PLAN.md
 PROGRESS.md
 .details
-PLAN.md
-PROGRESS.md
-PLAN.md
+tessera-enhancement-plan.md
+
+# Claude Code local config and memory.
+.claude/

@@ -1,12 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+const identityDecorator = (target: unknown): unknown => target;
+const angularDecorator = (): typeof identityDecorator => identityDecorator;
+
+vi.mock('@angular/core', () => ({
+  Injectable: angularDecorator,
+  NgModule: angularDecorator,
+}));
+
 describe('Angular framework adapter — TesseraService', () => {
-  beforeEach(() => {
-    vi.mock('@angular/core', () => ({
-      Injectable: () => (target: unknown) => target,
-      NgModule: () => (target: unknown) => target,
-    }));
-  });
+  beforeEach(() => {});
 
   it('exports TesseraService class', async () => {
     const { TesseraService } = await import('../../src/framework/angular/index');

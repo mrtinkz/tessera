@@ -43,8 +43,15 @@ const GRID_ROWS = 4;
 function shuffleArray<T>(array: readonly T[]): T[] {
   const copy = [...array];
   for (let i = copy.length - 1; i > 0; i--) {
-    const random = crypto.getRandomValues(new Uint32Array(1))[0]!;
-    const j = Math.floor(random % (i + 1));
+    // Rejection sampling to eliminate modulo bias. Discard values in the
+    // incomplete final bucket so every index in [0, i] is equally likely.
+    const bucketSize = Math.floor(0x1_00_00_00_00 / (i + 1));
+    const maxValid = bucketSize * (i + 1);
+    let random: number;
+    do {
+      random = crypto.getRandomValues(new Uint32Array(1))[0]!;
+    } while (random >= maxValid);
+    const j = Math.floor(random / bucketSize);
     const a = copy[i]!;
     const b = copy[j]!;
     copy[i] = b;
@@ -87,7 +94,7 @@ function resolveColors(wrapper: HTMLElement): PadColors {
     return v.length > 0 ? v : fallback;
   };
   return {
-    btnBg:    get('--tessera-btn-bg',    '#f0f0f0'),
+    btnBg: get('--tessera-btn-bg', '#f0f0f0'),
     btnColor: get('--tessera-btn-color', '#1a1a1a'),
   };
 }
@@ -114,7 +121,7 @@ function renderCanvas(
   // Build the 12-cell grid: digits[0..9] + spacer (index 10) + clear (index 11)
   const cells: Array<{ digit: string | null; label: string }> = [
     ...digits.map((d) => ({ digit: d, label: 'Digit button' })),
-    { digit: null, label: '' },      // spacer — invisible, no zone
+    { digit: null, label: '' }, // spacer — invisible, no zone
     { digit: 'CLEAR', label: 'Clear passcode' },
   ];
 
@@ -160,7 +167,10 @@ function renderCanvas(
 
       zones.push({
         digit: cell.digit === 'CLEAR' ? null : cell.digit!,
-        x, y, w: cellSize, h: cellSize,
+        x,
+        y,
+        w: cellSize,
+        h: cellSize,
         label: cell.label,
       });
     }
@@ -199,7 +209,7 @@ function renderCanvas(
  *   in-closure zone map, and positions change after each completed entry.
  */
 export function renderPinPad(container: HTMLElement, config: PinPadConfig): () => void {
-  const expectedLength = config.length ?? 6;
+  const expectedLength = Math.max(6, Math.min(16, config.length ?? 6));
   const cellSize = 60;
   const gap = 8;
 
@@ -231,14 +241,14 @@ export function renderPinPad(container: HTMLElement, config: PinPadConfig): () =
   wrapper.append(indicators);
 
   // Canvas — all digit interaction happens here.
-  const canvasWidth  = GRID_COLS * (cellSize + gap) - gap;
+  const canvasWidth = GRID_COLS * (cellSize + gap) - gap;
   const canvasHeight = GRID_ROWS * (cellSize + gap) - gap;
   const canvas = document.createElement('canvas');
-  canvas.width  = canvasWidth;
+  canvas.width = canvasWidth;
   canvas.height = canvasHeight;
   canvas.setAttribute('role', 'grid');
   canvas.setAttribute('aria-label', 'PIN digit grid');
-  canvas.style.cursor  = 'pointer';
+  canvas.style.cursor = 'pointer';
   canvas.style.display = 'block';
   wrapper.append(canvas);
 
@@ -305,11 +315,11 @@ export function renderPinPad(container: HTMLElement, config: PinPadConfig): () =
 
   /** Map a pointer event coordinate to a zone and handle it. */
   function handleHit(clientX: number, clientY: number): void {
-    const rect   = canvas.getBoundingClientRect();
-    const scaleX = canvas.width  / rect.width;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
     const x = (clientX - rect.left) * scaleX;
-    const y = (clientY - rect.top)  * scaleY;
+    const y = (clientY - rect.top) * scaleY;
 
     for (const zone of zones) {
       if (x >= zone.x && x <= zone.x + zone.w && y >= zone.y && y <= zone.y + zone.h) {

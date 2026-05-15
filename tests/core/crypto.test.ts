@@ -1,15 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import {
   deriveKey,
+  deriveHmacKey,
   encrypt,
   decrypt,
   getSalt,
   encryptWithSalt,
   decryptFull,
   zeroPasscode,
+  rotateKeyName,
 } from '../../src/core/crypto';
 
-async function makeKey(passcode = 'abc123') {
+async function makeKey(passcode = '246813') {
   const salt = await getSalt();
   return deriveKey(passcode, salt);
 }
@@ -19,22 +21,21 @@ async function makeKey(passcode = 'abc123') {
 // + AES-256-GCM. Fixed inputs → deterministic expected output.
 //
 // Inputs:
-//   passcode : 'abc123'
+//   passcode : '246813'
 //   salt     : 00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15  (16 bytes)
 //   iv       : 00 01 02 03 04 05 06 07 08 09 10 11              (12 bytes)
 //   plaintext: 'tessera'
 //
 // Expected payload (iv ‖ ciphertext ‖ auth-tag, base64):
-const KAT_PASSCODE = 'abc123';
+const KAT_PASSCODE = '246813';
 const KAT_SALT_HEX = '00010203040506070809101112131415';
-const KAT_IV_HEX   = '000102030405060708091011';
-const KAT_PAYLOAD_B64 = 'AAECAwQFBgcICRARNIbEccvuAL9KtzusxGVLcWY3mur/558=';
+const KAT_PAYLOAD_B64 = 'AAECAwQFBgcICRAR0HBCUp8BqQsenr1m6FedJ6lviRDcu/Y=';
 const KAT_PLAINTEXT = 'tessera';
 
 function hexToUint8Array(hex: string): Uint8Array {
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < hex.length; i += 2) {
-    bytes[i / 2] = parseInt(hex.slice(i, i + 2), 16);
+    bytes[i / 2] = Number.parseInt(hex.slice(i, i + 2), 16);
   }
   return bytes;
 }
@@ -42,7 +43,7 @@ function hexToUint8Array(hex: string): Uint8Array {
 describe('crypto.deriveKey', () => {
   it('should produce a non-extractable AES-GCM key from a passcode and salt', async () => {
     const salt = await getSalt();
-    const key = await deriveKey('abc123', salt);
+    const key = await deriveKey('246813', salt);
 
     expect(key.type).toBe('secret');
     expect(key.algorithm.name).toBe('AES-GCM');
@@ -54,28 +55,29 @@ describe('crypto.deriveKey', () => {
     await expect(deriveKey('a', salt)).rejects.toThrow();
   });
 
-  it('should reject a passcode longer than 8 characters', async () => {
+  it('should accept a passcode longer than 8 characters', async () => {
     const salt = await getSalt();
-    await expect(deriveKey('123456789', salt)).rejects.toThrow();
+    const key = await deriveKey('this-is-a-long-passphrase', salt);
+    expect(key.type).toBe('secret');
   });
 
   it('should reject iterations below the OWASP minimum', async () => {
     const salt = await getSalt();
-    await expect(deriveKey('abc123', salt, 100)).rejects.toThrow();
+    await expect(deriveKey('246813', salt, 100)).rejects.toThrow();
   });
 
   it('should produce different keys for different passcodes', async () => {
     const salt = await getSalt();
-    const keyA = await deriveKey('abc123', salt);
-    const keyB = await deriveKey('xyz789', salt);
+    const keyA = await deriveKey('246813', salt);
+    const keyB = await deriveKey('987654', salt);
     expect(keyA).not.toBe(keyB);
   });
 
   it('should produce different keys for different salts', async () => {
     const saltA = await getSalt();
     const saltB = await getSalt();
-    const keyA = await deriveKey('abc123', saltA);
-    const keyB = await deriveKey('abc123', saltB);
+    const keyA = await deriveKey('246813', saltA);
+    const keyB = await deriveKey('246813', saltB);
     expect(keyA).not.toBe(keyB);
   });
 });
@@ -136,8 +138,8 @@ describe('crypto.encrypt + decrypt (simple)', () => {
   });
 
   it('should fail to decrypt with a different key', async () => {
-    const keyA = await makeKey('abc123');
-    const keyB = await makeKey('xyz789');
+    const keyA = await makeKey('246813');
+    const keyB = await makeKey('987654');
     const encrypted = await encrypt(keyA, 'secret');
     const result = await decrypt(keyB, encrypted);
 
@@ -148,7 +150,8 @@ describe('crypto.encrypt + decrypt (simple)', () => {
     const key = await makeKey();
     const encrypted = await encrypt(key, 'tamper me');
     const bytes = atob(encrypted);
-    const tampered = bytes.slice(0, -1) + String.fromCharCode(bytes.charCodeAt(bytes.length - 1) ^ 1);
+    const tampered =
+      bytes.slice(0, -1) + String.fromCodePoint((bytes.codePointAt(bytes.length - 1) ?? 0) ^ 1);
     const tamperedB64 = btoa(tampered);
 
     const result = await decrypt(key, tamperedB64);
@@ -157,7 +160,7 @@ describe('crypto.encrypt + decrypt (simple)', () => {
 
   it('should handle 8-character passcode', async () => {
     const salt = await getSalt();
-    const key = await deriveKey('longpass', salt);
+    const key = await deriveKey('11223344', salt);
     const encrypted = await encrypt(key, 'data');
     const result = await decrypt(key, encrypted);
     expect(result.ok).toBe(true);
@@ -254,8 +257,69 @@ describe('crypto KAT — PBKDF2-SHA-256 + AES-256-GCM (fixed vector)', () => {
 
   it('should fail to decrypt the vector with the wrong passcode', async () => {
     const salt = hexToUint8Array(KAT_SALT_HEX);
-    const wrongKey = await deriveKey('xyz789', salt, 310_000);
+    const wrongKey = await deriveKey('987654', salt, 310_000);
     const result = await decrypt(wrongKey, KAT_PAYLOAD_B64);
     expect(result.ok).toBe(false);
+  });
+});
+
+describe('crypto.deriveHmacKey', () => {
+  it('should produce a non-extractable HMAC-SHA256 key', async () => {
+    const salt = await getSalt();
+    const hmacKey = await deriveHmacKey('246813', salt);
+    expect(hmacKey.type).toBe('secret');
+    expect(hmacKey.algorithm.name).toBe('HMAC');
+    expect(hmacKey.extractable).toBe(false);
+    expect(hmacKey.usages).toContain('sign');
+    expect(hmacKey.usages).toContain('verify');
+  });
+
+  it('should produce different HMAC keys for different salts', async () => {
+    const saltA = await getSalt();
+    const saltB = await getSalt();
+    const keyA = await deriveHmacKey('246813', saltA);
+    const keyB = await deriveHmacKey('246813', saltB);
+    // They are different CryptoKey objects (we cannot compare internal bytes directly)
+    expect(keyA).not.toBe(keyB);
+  });
+
+  it('should reject a passcode shorter than 6 characters', async () => {
+    const salt = await getSalt();
+    await expect(deriveHmacKey('a', salt)).rejects.toThrow();
+  });
+});
+
+describe('crypto.rotateKeyName (HMAC-based)', () => {
+  it('should return a t_-prefixed 34-character key', async () => {
+    const salt = await getSalt();
+    const hmacKey = await deriveHmacKey('246813', salt);
+    const rotated = await rotateKeyName(hmacKey, 'my-key');
+    expect(rotated).toMatch(/^t_[\da-f]{32}$/);
+  });
+
+  it('should produce the same output for the same inputs (deterministic)', async () => {
+    const salt = await getSalt();
+    const hmacKey = await deriveHmacKey('246813', salt);
+    const a = await rotateKeyName(hmacKey, 'my-key');
+    const b = await rotateKeyName(hmacKey, 'my-key');
+    expect(a).toBe(b);
+  });
+
+  it('should produce different outputs for different developer keys', async () => {
+    const salt = await getSalt();
+    const hmacKey = await deriveHmacKey('246813', salt);
+    const a = await rotateKeyName(hmacKey, 'key-1');
+    const b = await rotateKeyName(hmacKey, 'key-2');
+    expect(a).not.toBe(b);
+  });
+
+  it('should produce different outputs for different HMAC keys (different salts)', async () => {
+    const saltA = await getSalt();
+    const saltB = await getSalt();
+    const hmacKeyA = await deriveHmacKey('246813', saltA);
+    const hmacKeyB = await deriveHmacKey('246813', saltB);
+    const a = await rotateKeyName(hmacKeyA, 'my-key');
+    const b = await rotateKeyName(hmacKeyB, 'my-key');
+    expect(a).not.toBe(b);
   });
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import {
   recordFailedAttempt,
   checkLockout,
@@ -50,7 +50,11 @@ describe('lockout', () => {
     // Simulate time passing beyond the lockout window by manipulating the stored record
     const stored = localStorage.getItem('tessera_lockout');
     expect(stored).not.toBeNull();
-    const record = JSON.parse(stored!) as { attempts: number; lockedUntil: number; backoffMs: number };
+    const record = JSON.parse(stored!) as {
+      attempts: number;
+      lockedUntil: number;
+      backoffMs: number;
+    };
     record.lockedUntil = Date.now() - 1; // already expired
     localStorage.setItem('tessera_lockout', JSON.stringify(record));
 

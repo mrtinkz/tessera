@@ -1,138 +1,312 @@
 import {
-  type IVault,
-  type TesseraConfig,
+  type IEnhancedVault,
+  type EnhancedTesseraConfig,
+  type TesseraEventName,
+  type TesseraEventHandler,
   TesseraError,
   TesseraErrorCode,
-  DEFAULT_CONFIG,
 } from './types';
-import { deriveKey, getSalt, unsecuredGetSalt } from './core/crypto';
+import {
+  deriveKey,
+  deriveHmacKey,
+  getSalt,
+  unsecuredGetSalt,
+  encrypt,
+  decrypt,
+} from './core/crypto';
 import { KeySession } from './core/session';
-import { checkLockout, recordFailedAttempt, resetLockout, getRemainingAttempts, performWipe } from './core/lockout';
+import {
+  checkLockout,
+  recordFailedAttempt,
+  resetLockout,
+  getRemainingAttempts,
+  performWipe,
+  signLockoutRecord,
+  verifyLockoutRecord,
+} from './core/lockout';
+import { TesseraEmitter } from './core/events';
+import { resolveConfig, type ResolvedConfig } from './core/config';
+import { SuspicionEngine } from './core/suspicion';
+import { HoneyKeyManager } from './storage/honey';
 import { LocalStorageAdapter } from './adapters/local-storage';
 import { SessionStorageAdapter } from './adapters/session-storage';
 import { CookieAdapter } from './adapters/cookie';
 import { IndexedDbAdapter } from './adapters/indexed-db';
 
 export { TesseraError, TesseraErrorCode } from './types';
-export type { TesseraConfig, IVault, IStorageAdapter, ICookieAdapter, IIDBAdapter, CookieOptions, PinPadConfig } from './types';
+export type {
+  TesseraConfig,
+  EnhancedTesseraConfig,
+  IVault,
+  IEnhancedVault,
+  IStorageAdapter,
+  ICookieAdapter,
+  IIDBAdapter,
+  CookieOptions,
+  StorageItemOptions,
+  PinPadConfig,
+  SensitivityLevel,
+  SuspicionAction,
+  StorageMode,
+  TesseraEventName,
+  TesseraEventPayloads,
+  TesseraEventHandler,
+} from './types';
 export { deriveKey, decrypt, encrypt, encryptWithSalt, decryptFull } from './core/crypto';
 export { renderPinPad } from './ui/pin-pad';
 
+const SALT_STORAGE_KEY = 'tessera_vault_salt';
+const VERIFIER_STORAGE_KEY = 'tessera_vault_verifier';
+const VAULT_SENTINEL = '\u0000tessera-vault-verifier\u0000';
+
 /**
- * The primary tessera API.
+ * The main entry point for tessera.
  *
- * @example Vanilla JS / TypeScript
+ * @example
  * ```ts
- * import { Tessera } from 'tessera';
- *
- * const vault = await Tessera.unlock('abc123', { iterations: 310_000 });
- * await vault.local.setItem('cart', JSON.stringify(cart));
- * const cart = await vault.local.getItem('cart');
+ * const vault = await Tessera.unlock('my-passcode', { idleTimeout: 600_000 });
+ * await vault.local.setItem('key', 'value');
  * vault.lock();
  * ```
  */
 export const Tessera = {
   /**
-   * Derives an AES-256-GCM key from `passcode` via PBKDF2-SHA-256 and returns
-   * an `IVault` whose adapters transparently encrypt and decrypt all storage
-   * operations.
+   * Derives an AES-256-GCM key from the passcode, verifies it against the
+   * persisted vault verifier, and returns an {@link IEnhancedVault} with four
+   * encrypted storage adapters.
    *
-   * Each call creates a **new**, isolated `KeySession`. Multiple concurrent
-   * vaults with different passcodes are supported.
+   * **First unlock**: generates a random 128-bit salt, derives the key, and
+   * stores both the salt and an encrypted sentinel (`tessera_vault_verifier`)
+   * in `localStorage`. The sentinel is used to reject wrong passcodes on all
+   * subsequent unlocks.
    *
-   * @param passcode - The user's passcode (6–8 characters).
-   * @param config   - Optional configuration overrides; see {@link TesseraConfig}.
-   * @returns An `IVault` with encrypted `local`, `session`, `cookie`, and `idb`
-   *   adapters, plus `lock()` and `isLocked()` helpers.
+   * **Subsequent unlocks**: reads the persisted salt, re-derives the key, and
+   * decrypts the sentinel. If the sentinel does not match, `INVALID_PASSCODE`
+   * is thrown — the vault does not open.
    *
-   * @throws {TesseraError} `INVALID_PASSCODE` if passcode is outside 6–8 chars.
-   * @throws {TesseraError} `LOCKOUT` if the lockout threshold has been exceeded.
-   * @throws {TesseraError} `UNSUPPORTED_ENV` if `crypto.subtle` is unavailable.
+   * @param passcode - The user's passcode. Minimum 6 characters. No maximum.
+   *   For human-entered PINs use {@link renderPinPad}; for programmatic use
+   *   any string of sufficient entropy works (GUID, random hex, passphrase).
+   * @param config   - Optional vault configuration. All fields have safe defaults.
    *
-   * @example
+   * @returns A fully initialised {@link IEnhancedVault}.
+   *
+   * @throws {TesseraError} `UNSUPPORTED_ENV`  — `crypto.subtle` is unavailable
+   *   (SSR, old browser). Use tessera only in client-side code.
+   * @throws {TesseraError} `INVALID_PASSCODE` — passcode is shorter than 6
+   *   characters, or does not match the persisted vault verifier.
+   * @throws {TesseraError} `LOCKOUT`          — too many failed attempts;
+   *   the lockout window has not expired yet.
+   * @throws {TesseraError} `DECRYPT_FAILED`   — wrong passcode (bad verifier).
+   *
+   * @example Basic unlock
    * ```ts
-   * const vault = await Tessera.unlock('abc123');
-   * await vault.local.setItem('theme', 'dark');
-   * const theme = await vault.local.getItem('theme'); // 'dark'
-   * vault.lock();
-   * vault.isLocked(); // true
+   * const vault = await Tessera.unlock('246813');
+   * await vault.local.setItem('username', 'alice');
+   * ```
+   *
+   * @example With security config
+   * ```ts
+   * const vault = await Tessera.unlock('my-passphrase', {
+   *   lockoutAttempts: 5,
+   *   lockoutAction:   'wipe',
+   *   idleTimeout:     600_000,
+   *   defaultSensitivity: 'high',
+   * });
    * ```
    *
    * @security
-   *   - Key derivation uses PBKDF2 at ≥ 310 000 iterations (OWASP 2024, T5).
-   *   - The derived `CryptoKey` is non-extractable and lives only in memory (T7).
-   *   - All storage values are encrypted with `salt ‖ iv ‖ ciphertext ‖ tag` (T1).
+   * - Key derivation: PBKDF2-SHA-256 with a cryptographically random 128-bit
+   *   salt and ≥ 310 000 iterations (OWASP 2024 minimum).
+   * - The derived `CryptoKey` is `extractable: false` — raw bytes never leave
+   *   the Web Crypto engine (T7).
+   * - Wrong passcode detection: a sentinel encrypted with the vault key is
+   *   persisted on first unlock; decryption failure rejects the passcode before
+   *   any storage is touched.
+   * - The in-memory key is held in a `KeySession` closure and is never assigned
+   *   to a module-level variable.
    */
-  async unlock(
-    passcode: string,
-    config?: TesseraConfig,
-  ): Promise<IVault> {
-    const resolvedConfig = { ...DEFAULT_CONFIG, ...config };
+  async unlock(passcode: string, config?: EnhancedTesseraConfig): Promise<IEnhancedVault> {
+    const resolved: ResolvedConfig = resolveConfig(config);
 
-    checkLockout(resolvedConfig.lockoutAttempts);
+    checkLockout(resolved.lockoutAttempts);
 
-    // Each unlock() creates an isolated KeySession — the derived key lives
-    // only in this closure and never in a module-level variable (PLAN §5).
     const session = new KeySession();
+    const events = new TesseraEmitter();
+    const suspicion = new SuspicionEngine(resolved, events);
 
     try {
-      // Persist the vault salt in localStorage so the same key is re-derived
-      // across sessions. The salt is not secret — PBKDF2 salts are designed
-      // to be public; security comes from the passcode and iteration count.
-      // If the salt record is absent (first unlock or after wipe), generate
-      // a new one and save it. If localStorage is unavailable, fall back to
-      // a fresh random salt (ephemeral session only).
-      const SALT_STORAGE_KEY = 'tessera_vault_salt';
       let salt: Uint8Array;
+      let isNewVault = false;
       try {
         const stored = localStorage.getItem(SALT_STORAGE_KEY);
         if (stored === null) {
-          // First unlock — generate, persist, and use a fresh salt.
           salt = await getSalt();
           const binary = [...salt].map((b) => String.fromCodePoint(b)).join('');
           localStorage.setItem(SALT_STORAGE_KEY, btoa(binary));
+          isNewVault = true;
         } else {
-          // Reuse the stored salt so the same passcode re-derives the same key.
           const raw = atob(stored);
           salt = new Uint8Array(raw.length);
           for (let i = 0; i < raw.length; i++) salt[i] = raw.codePointAt(i)!;
         }
       } catch {
-        // localStorage unavailable (private browsing restriction, etc.) —
-        // derive a fresh ephemeral salt. Cross-session persistence won't work
-        // but all in-session operations are fully functional.
         salt = unsecuredGetSalt();
+        isNewVault = true;
       }
 
-      const key = await deriveKey(passcode, salt, resolvedConfig.iterations);
+      const key = await deriveKey(passcode, salt, resolved.iterations);
+      const hmacKey = await deriveHmacKey(passcode, salt, resolved.iterations);
 
-      session.setKey(key, resolvedConfig.idleTimeout);
+      // Verify passcode against the persisted verifier, or create one for new/upgraded vaults.
+      let storedVerifier: string | null = null;
+      if (!isNewVault) {
+        try {
+          storedVerifier = localStorage.getItem(VERIFIER_STORAGE_KEY);
+        } catch {
+          /* unavailable */
+        }
+      }
+      if (storedVerifier === null) {
+        // New vault or pre-verifier vault being upgraded — store verifier now.
+        const verifier = await encrypt(key, VAULT_SENTINEL);
+        try {
+          localStorage.setItem(VERIFIER_STORAGE_KEY, verifier);
+        } catch {
+          /* best-effort */
+        }
+      } else {
+        const verifyResult = await decrypt(key, storedVerifier);
+        if (!verifyResult.ok || verifyResult.value !== VAULT_SENTINEL) {
+          throw new TesseraError(TesseraErrorCode.INVALID_PASSCODE, 'Incorrect passcode.');
+        }
+        // FIX 2: Verify the lockout record has not been tampered with.
+        const lockoutIntact = await verifyLockoutRecord(hmacKey);
+        if (!lockoutIntact) {
+          throw new TesseraError(
+            TesseraErrorCode.LOCKOUT,
+            'Lockout record tampered. Access denied.',
+          );
+        }
+      }
+
+      // Encrypt a sentinel with the vault key. Used to verify reconfirm passcodes.
+      const reconfirmSentinel = await encrypt(key, '\u0000tessera-verify\u0000');
+
+      session.setKey(key, resolved.idleTimeout, () => {
+        events.emit('auto-locked', { reason: 'idle-timeout' });
+        events.emit('vault-locked', { reason: 'idle-timeout' });
+      });
+      session.setHmacKey(hmacKey);
       session.touch();
 
       resetLockout();
+      // FIX 2: Sign the lockout record after a successful unlock.
+      await signLockoutRecord(hmacKey);
 
-      return {
-        local: new LocalStorageAdapter(resolvedConfig, session),
-        session: new SessionStorageAdapter(resolvedConfig, session),
-        cookie: new CookieAdapter(resolvedConfig, session),
-        idb: new IndexedDbAdapter(session),
-        lock: () => session.lock(),
-        isLocked: () => session.isLocked(),
+      // FIX 5: Create a lock proof for authenticated BroadcastChannel lock messages.
+      const lockProof = await encrypt(key, '\u0000tessera-lock\u0000');
+      session.setLockProof(lockProof);
+
+      events.emit('vault-unlocked', { mode: 'normal' });
+
+      const honeyManager = new HoneyKeyManager(resolved);
+
+      const localAdapter = new LocalStorageAdapter(resolved, session, events, suspicion);
+      const sessionAdapter = new SessionStorageAdapter(resolved, session, events, suspicion);
+      const cookieAdapter = new CookieAdapter(resolved, session, events, suspicion);
+      const idbAdapter = new IndexedDbAdapter(resolved, session, events, suspicion);
+
+      suspicion.setOnLockdown(async () => {
+        session.lock();
+        const wiped: string[] = [];
+        await localAdapter.wipeHighSensitivity(wiped);
+        await sessionAdapter.wipeHighSensitivity(wiped);
+        await cookieAdapter.wipeHighSensitivity(wiped);
+        await idbAdapter.wipeHighSensitivity(wiped);
+        events.emit('vault-locked', { reason: 'suspicion-lockdown' });
+        return wiped;
+      });
+
+      localAdapter.setHoneyManager(honeyManager);
+      sessionAdapter.setHoneyManager(honeyManager);
+      cookieAdapter.setHoneyManager(honeyManager);
+      sessionAdapter.setIdbAdapter(idbAdapter);
+      cookieAdapter.setIdbAdapter(idbAdapter);
+
+      const vaultSalt = salt;
+
+      const enhancedVault: IEnhancedVault = {
+        local: localAdapter,
+        session: sessionAdapter,
+        cookie: cookieAdapter,
+        idb: idbAdapter,
+
+        on<E extends TesseraEventName>(event: E, handler: TesseraEventHandler<E>): void {
+          events.on(event, handler);
+        },
+
+        off<E extends TesseraEventName>(event: E, handler?: TesseraEventHandler<E>): void {
+          events.off(event, handler);
+        },
+
+        lock(): void {
+          session.lock();
+          suspicion.destroy();
+          honeyManager.clearAll();
+          events.emit('vault-locked', { reason: 'user' });
+        },
+
+        isLocked(): boolean {
+          return session.isLocked();
+        },
+
+        async reconfirm(passcode: string): Promise<void> {
+          const confirmKey = await deriveKey(passcode, vaultSalt, resolved.iterations);
+          const verifyResult = await decrypt(confirmKey, reconfirmSentinel);
+          if (!verifyResult.ok || verifyResult.value !== '\u0000tessera-verify\u0000') {
+            suspicion.recordPasscodeFailure();
+            throw new TesseraError(
+              TesseraErrorCode.INVALID_PASSCODE,
+              'Incorrect passcode for reconfirmation.',
+            );
+          }
+          // Guard: if the vault locked while deriveKey was running, do not store
+          // the reconfirm key on a locked session.
+          if (session.isLocked()) {
+            throw new TesseraError(TesseraErrorCode.LOCKED, 'Vault locked during reconfirmation.');
+          }
+          session.setReconfirmKey(confirmKey);
+          events.emit('vault-unlocked', { mode: 'reconfirm' });
+        },
+
+        terminate(): void {
+          session.lock();
+          events.clear();
+          suspicion.destroy();
+          honeyManager.clearAll();
+        },
+
+        _simulateHoneyHit(backend: 'local' | 'session' | 'cookie'): void {
+          if (session.isLocked()) return;
+          suspicion.recordHoneyHit(backend);
+        },
       };
+
+      return enhancedVault;
     } catch (error) {
       session.reset();
+      events.clear();
 
-      // Re-throw LOCKOUT errors from checkLockout() immediately — do not
-      // record an additional failed attempt for an already-locked session.
       if (error instanceof TesseraError && error.code === TesseraErrorCode.LOCKOUT) {
         throw error;
       }
 
-      recordFailedAttempt(resolvedConfig.lockoutAttempts);
-      const remaining = getRemainingAttempts(resolvedConfig.lockoutAttempts);
+      recordFailedAttempt(resolved.lockoutAttempts);
+      const remaining = getRemainingAttempts(resolved.lockoutAttempts);
 
       if (remaining === 0) {
-        if (resolvedConfig.lockoutAction === 'wipe') {
+        if (resolved.lockoutAction === 'wipe') {
           performWipe();
           throw new TesseraError(
             TesseraErrorCode.LOCKOUT,
@@ -140,20 +314,18 @@ export const Tessera = {
           );
         }
 
-        if (resolvedConfig.lockoutAction === 'throw') {
+        if (resolved.lockoutAction === 'throw') {
           throw new TesseraError(
             TesseraErrorCode.LOCKOUT,
             'Too many failed attempts. Access is permanently locked.',
           );
         }
-
-        // 'delay': next call to checkLockout() will enforce the backoff window.
-        // Fall through and throw the original error with attempt context.
       }
 
-      const attemptMsg = remaining > 0
-        ? ` ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`
-        : ' No attempts remaining — a delay has been applied.';
+      const attemptMsg =
+        remaining > 0
+          ? ` ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`
+          : ' No attempts remaining — a delay has been applied.';
 
       throw new TesseraError(
         TesseraErrorCode.DECRYPT_FAILED,

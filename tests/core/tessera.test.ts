@@ -11,7 +11,7 @@ describe('Tessera.unlock', () => {
   });
 
   it('should unlock and return a vault with all adapters', async () => {
-    const vault = await Tessera.unlock('abc123');
+    const vault = await Tessera.unlock('246813');
     expect(vault).toBeDefined();
     expect(vault.local).toBeDefined();
     expect(vault.session).toBeDefined();
@@ -22,23 +22,24 @@ describe('Tessera.unlock', () => {
   });
 
   it('should start unlocked after Tessera.unlock()', async () => {
-    const vault = await Tessera.unlock('abc123');
+    const vault = await Tessera.unlock('246813');
     expect(vault.isLocked()).toBe(false);
   });
 
   it('should store and retrieve encrypted data via localStorage adapter', async () => {
-    const vault = await Tessera.unlock('abc123');
+    const vault = await Tessera.unlock('246813');
     await vault.local.setItem('key', 'value');
     const result = await vault.local.getItem('key');
     expect(result).toBe('value');
 
-    const raw = localStorage.getItem('key');
-    expect(raw).not.toBe('value');
+    const rawKey = await vault.local.getRawKey!('key');
+    const raw = localStorage.getItem(rawKey);
     expect(raw).not.toBeNull();
+    expect(raw).not.toBe('value');
   });
 
   it('should lock and prevent subsequent reads returning null', async () => {
-    const vault = await Tessera.unlock('abc123');
+    const vault = await Tessera.unlock('246813');
     await vault.local.setItem('key', 'value');
     vault.lock();
     expect(vault.isLocked()).toBe(true);
@@ -58,28 +59,35 @@ describe('Tessera.unlock', () => {
     expect(result).toBe('hello cross-session');
   });
 
-  it('should return null when a different passcode is used (wrong key)', async () => {
-    // Write with one passcode.
+  it('should reject an incorrect passcode when a vault already exists', async () => {
     const vault1 = await Tessera.unlock('111111');
     await vault1.local.setItem('secret', 'encrypted-data');
     vault1.lock();
 
-    // Read with a different passcode — key is wrong, decryption fails.
-    const vault2 = await Tessera.unlock('999999');
+    // Wrong passcode — verifier check must reject it before the vault opens.
+    await expect(Tessera.unlock('999999')).rejects.toThrow();
+  });
+
+  it('should re-derive correctly and read data with the right passcode after lock', async () => {
+    const vault1 = await Tessera.unlock('111111');
+    await vault1.local.setItem('secret', 'encrypted-data');
+    vault1.lock();
+
+    const vault2 = await Tessera.unlock('111111');
     const result = await vault2.local.getItem('secret');
-    expect(result).toBeNull();
+    expect(result).toBe('encrypted-data');
   });
 
   it('persists the vault salt in localStorage as tessera_vault_salt', async () => {
     expect(localStorage.getItem('tessera_vault_salt')).toBeNull();
-    await Tessera.unlock('abc123');
+    await Tessera.unlock('246813');
     expect(localStorage.getItem('tessera_vault_salt')).not.toBeNull();
   });
 
   it('reuses the stored salt on subsequent unlocks', async () => {
-    await Tessera.unlock('abc123');
+    await Tessera.unlock('246813');
     const salt1 = localStorage.getItem('tessera_vault_salt');
-    await Tessera.unlock('abc123');
+    await Tessera.unlock('246813');
     const salt2 = localStorage.getItem('tessera_vault_salt');
     expect(salt1).toBe(salt2);
   });
@@ -88,18 +96,15 @@ describe('Tessera.unlock', () => {
     await expect(Tessera.unlock('a')).rejects.toThrow();
   });
 
-  it('should reject long passcode', async () => {
-    await expect(Tessera.unlock('123456789')).rejects.toThrow();
+  it('should accept a long passcode (no upper-length limit)', async () => {
+    const vault = await Tessera.unlock('this-is-a-long-passphrase-123');
+    expect(vault.isLocked()).toBe(false);
   });
 
-  // Note: Tessera.unlock() always succeeds structurally for any valid 6–8 char passcode —
-  // there is no passcode-verification step. The "wrong passcode" effect is observable only
-  // when trying to decrypt previously-written data (returns null). Lockout is triggered by
-  // any exception during unlock (e.g. passcode length validation failure). Use a short
-  // passcode (< 6 chars e.g. 'bad') to trigger INVALID_PASSCODE for lockout tests.
-
   it('should count failed attempts and surface remaining count in error message', async () => {
-    const err = await Tessera.unlock('bad', { lockoutAttempts: 5 }).catch((e: unknown) => e);
+    const err = await Tessera.unlock('bad', { lockoutAttempts: 5 }).catch(
+      (error: unknown) => error,
+    );
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).toMatch(/4 attempt/i);
   });
@@ -108,7 +113,9 @@ describe('Tessera.unlock', () => {
     for (let i = 0; i < 5; i++) {
       await Tessera.unlock('bad', { lockoutAttempts: 5 }).catch(() => {});
     }
-    const err = await Tessera.unlock('bad', { lockoutAttempts: 5 }).catch((e: unknown) => e);
+    const err = await Tessera.unlock('bad', { lockoutAttempts: 5 }).catch(
+      (error: unknown) => error,
+    );
     expect(err).toBeInstanceOf(Error);
     expect((err as { code?: string }).code).toBe(TesseraErrorCode.LOCKOUT);
   });
@@ -119,7 +126,9 @@ describe('Tessera.unlock', () => {
     for (let i = 0; i < 2; i++) {
       await Tessera.unlock('bad', { lockoutAttempts: 3, lockoutAction: 'throw' }).catch(() => {});
     }
-    const err = await Tessera.unlock('bad', { lockoutAttempts: 3, lockoutAction: 'throw' }).catch((e: unknown) => e);
+    const err = await Tessera.unlock('bad', { lockoutAttempts: 3, lockoutAction: 'throw' }).catch(
+      (error: unknown) => error,
+    );
     expect((err as { code?: string }).code).toBe(TesseraErrorCode.LOCKOUT);
     expect((err as Error).message).toMatch(/permanently locked/i);
   });
@@ -130,9 +139,26 @@ describe('Tessera.unlock', () => {
     for (let i = 0; i < 2; i++) {
       await Tessera.unlock('bad', { lockoutAttempts: 3, lockoutAction: 'wipe' }).catch(() => {});
     }
-    const err = await Tessera.unlock('bad', { lockoutAttempts: 3, lockoutAction: 'wipe' }).catch((e: unknown) => e);
+    const err = await Tessera.unlock('bad', { lockoutAttempts: 3, lockoutAction: 'wipe' }).catch(
+      (error: unknown) => error,
+    );
     expect((err as { code?: string }).code).toBe(TesseraErrorCode.LOCKOUT);
     expect((err as Error).message).toMatch(/wiped/i);
     expect(localStorage.getItem('sensitive')).toBeNull();
+  });
+
+  it('stored localStorage key has t_ prefix with 32-char hex suffix (rotateKeyName format)', async () => {
+    const vault = await Tessera.unlock('246813');
+    await vault.local.setItem('testkey', 'testvalue');
+
+    // The raw key used in localStorage should be in `t_<32hex>` format (34 chars total).
+    const rawKey = await vault.local.getRawKey!('testkey');
+    expect(rawKey).toMatch(/^t_[\da-f]{32}$/);
+    expect(rawKey).toHaveLength(34);
+
+    // The raw storage value should be encrypted (not the plaintext).
+    const raw = localStorage.getItem(rawKey);
+    expect(raw).not.toBeNull();
+    expect(raw).not.toBe('testvalue');
   });
 });

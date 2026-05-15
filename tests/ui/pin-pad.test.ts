@@ -57,6 +57,24 @@ describe('renderPinPad — structure', () => {
     expect(container.querySelectorAll('.tessera-pin-pad-dot').length).toBe(6);
   });
 
+  it('clamps length below 6 up to 6', () => {
+    const container = makeContainer();
+    renderPinPad(container, { onUnlock: vi.fn(), length: 4 });
+    expect(container.querySelectorAll('.tessera-pin-pad-dot').length).toBe(6);
+  });
+
+  it('clamps length above 16 down to 16', () => {
+    const container = makeContainer();
+    renderPinPad(container, { onUnlock: vi.fn(), length: 20 });
+    expect(container.querySelectorAll('.tessera-pin-pad-dot').length).toBe(16);
+  });
+
+  it('accepts length: 16 (maximum)', () => {
+    const container = makeContainer();
+    renderPinPad(container, { onUnlock: vi.fn(), length: 16 });
+    expect(container.querySelectorAll('.tessera-pin-pad-dot').length).toBe(16);
+  });
+
   it('renders an ARIA group wrapper with correct attributes', () => {
     const container = makeContainer();
     renderPinPad(container, { onUnlock: vi.fn() });
@@ -133,69 +151,72 @@ describe('renderPinPad — structure', () => {
     const container = makeContainer();
     renderPinPad(container, { onUnlock: vi.fn() });
     const canvas = container.querySelector('canvas') as HTMLCanvasElement;
-    expect(canvas.width).toBe(3 * (60 + 8) - 8);   // 196
-    expect(canvas.height).toBe(4 * (60 + 8) - 8);  // 268
+    expect(canvas.width).toBe(3 * (60 + 8) - 8); // 196
+    expect(canvas.height).toBe(4 * (60 + 8) - 8); // 268
   });
 });
+
+function setupWithMockCtx(config: PinPadConfig): {
+  container: HTMLDivElement;
+  canvas: HTMLCanvasElement;
+  cleanup: () => void;
+} {
+  const container = makeContainer();
+
+  // Pre-patch getContext on any canvas created by renderPinPad.
+  const origCreate = document.createElement.bind(document);
+  vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
+    const el = origCreate(tag);
+    if (tag === 'canvas') {
+      // Keep this mock alive for the entire test (do NOT restore before cleanup).
+      // draw() is called both during initial render AND after each completed
+      // entry, so getContext must remain mocked or zones become empty.
+      vi.spyOn(el as HTMLCanvasElement, 'getContext').mockReturnValue(ctx2dStub);
+    }
+    return el;
+  });
+
+  const cleanup = renderPinPad(container, config);
+  // Restore only the document.createElement spy; the canvas.getContext spy
+  // is on the specific element and remains live.
+  vi.mocked(document.createElement).mockRestore();
+
+  const canvas = container.querySelector('canvas') as HTMLCanvasElement;
+
+  // Mock getBoundingClientRect so hit-test coordinates resolve correctly.
+  const canvasW = 3 * (60 + 8) - 8;
+  const canvasH = 4 * (60 + 8) - 8;
+  vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, canvasW, canvasH));
+
+  return { container, canvas, cleanup };
+}
+
+const centre = (col: number, row: number): [number, number] => [col * 68 + 30, row * 68 + 30];
 
 describe('renderPinPad — hit-test zone logic', () => {
   // These tests simulate clicks at known canvas coordinates to verify that
   // the hit-test correctly identifies digit zones.
   // We mock getBoundingClientRect so the canvas occupies a known screen rect.
 
-  function setupWithMockCtx(config: PinPadConfig): {
-    container: HTMLDivElement;
-    canvas: HTMLCanvasElement;
-    cleanup: () => void;
-  } {
-    const container = makeContainer();
-
-    // Pre-patch getContext on any canvas created by renderPinPad.
-    const origCreate = document.createElement.bind(document);
-    vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
-      const el = origCreate(tag);
-      if (tag === 'canvas') {
-        // Keep this mock alive for the entire test (do NOT restore before cleanup).
-        // draw() is called both during initial render AND after each completed
-        // entry, so getContext must remain mocked or zones become empty.
-        vi.spyOn(el as HTMLCanvasElement, 'getContext').mockReturnValue(ctx2dStub);
-      }
-      return el;
-    });
-
-    const cleanup = renderPinPad(container, config);
-    // Restore only the document.createElement spy; the canvas.getContext spy
-    // is on the specific element and remains live.
-    vi.mocked(document.createElement).mockRestore();
-
-    const canvas = container.querySelector('canvas') as HTMLCanvasElement;
-
-    // Mock getBoundingClientRect so hit-test coordinates resolve correctly.
-    const canvasW = 3 * (60 + 8) - 8;
-    const canvasH = 4 * (60 + 8) - 8;
-    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(
-      new DOMRect(0, 0, canvasW, canvasH),
-    );
-
-    return { container, canvas, cleanup };
-  }
-
   it('fires onUnlock after the correct number of zone hits', () => {
     const onUnlock = vi.fn();
-    const { canvas } = setupWithMockCtx({ onUnlock, length: 4, randomize: false });
+    const { canvas } = setupWithMockCtx({ onUnlock, length: 6, randomize: false });
 
-    // Cell centres: col * (60+8) + 30, row * (60+8) + 30
-    const centre = (col: number, row: number): [number, number] =>
-      [col * 68 + 30, row * 68 + 30];
-
-    for (const [cx, cy] of [centre(0,0), centre(1,0), centre(2,0), centre(0,1)] as [number,number][]) {
+    for (const [cx, cy] of [
+      centre(0, 0),
+      centre(1, 0),
+      centre(2, 0),
+      centre(0, 1),
+      centre(1, 1),
+      centre(2, 1),
+    ] as [number, number][]) {
       canvas.dispatchEvent(new MouseEvent('click', { clientX: cx, clientY: cy, bubbles: true }));
     }
 
     expect(onUnlock).toHaveBeenCalledTimes(1);
     const passcode = onUnlock.mock.calls[0]?.[0] as string;
     expect(typeof passcode).toBe('string');
-    expect(passcode.length).toBe(4);
+    expect(passcode.length).toBe(6);
   });
 
   it('does not fire onUnlock before enough digits', () => {
@@ -211,7 +232,7 @@ describe('renderPinPad — hit-test zone logic', () => {
 
   it('resets progress after a hit in the clear zone', () => {
     const onUnlock = vi.fn();
-    const { canvas } = setupWithMockCtx({ onUnlock, length: 4, randomize: false });
+    const { canvas } = setupWithMockCtx({ onUnlock, length: 6, randomize: false });
 
     // Enter 3 digits
     for (let i = 0; i < 3; i++) {
@@ -221,9 +242,11 @@ describe('renderPinPad — hit-test zone logic', () => {
     // Click clear zone (col=1, row=3 → centre (1*68+30, 3*68+30) = (98, 234))
     canvas.dispatchEvent(new MouseEvent('click', { clientX: 98, clientY: 234, bubbles: true }));
 
-    // Now enter 4 digits → onUnlock fires exactly once
-    for (const col of [0, 1, 2, 0]) {
-      canvas.dispatchEvent(new MouseEvent('click', { clientX: col * 68 + 30, clientY: 30, bubbles: true }));
+    // Now enter 6 digits → onUnlock fires exactly once
+    for (const col of [0, 1, 2, 0, 1, 2]) {
+      canvas.dispatchEvent(
+        new MouseEvent('click', { clientX: col * 68 + 30, clientY: 30, bubbles: true }),
+      );
     }
 
     expect(onUnlock).toHaveBeenCalledTimes(1);
@@ -235,7 +258,7 @@ describe('renderPinPad — hit-test zone logic', () => {
     let count = 0;
 
     const { canvas } = setupWithMockCtx({
-      length: 4,
+      length: 6,
       randomize: true,
       onUnlock: (p) => {
         passes.push(p);
@@ -243,14 +266,14 @@ describe('renderPinPad — hit-test zone logic', () => {
       },
     });
 
-    // First entry — 4 clicks on (0,0) position
-    for (let i = 0; i < 4; i++) {
+    // First entry — 6 clicks on (0,0) position
+    for (let i = 0; i < 6; i++) {
       canvas.dispatchEvent(new MouseEvent('click', { clientX: 30, clientY: 30, bubbles: true }));
     }
     expect(count).toBe(1);
 
-    // Second entry — 4 clicks on same screen position
-    for (let i = 0; i < 4; i++) {
+    // Second entry — 6 clicks on same screen position
+    for (let i = 0; i < 6; i++) {
       canvas.dispatchEvent(new MouseEvent('click', { clientX: 30, clientY: 30, bubbles: true }));
     }
     expect(count).toBe(2);
@@ -258,10 +281,10 @@ describe('renderPinPad — hit-test zone logic', () => {
     // With randomize: true the digit at (0,0) is likely different between
     // entries, so the two passcodes are likely different.
     // We can't assert equality/inequality deterministically, but both should
-    // be 4-char strings.
+    // be 6-char strings.
     for (const p of passes) {
       expect(typeof p).toBe('string');
-      expect(p.length).toBe(4);
+      expect(p.length).toBe(6);
     }
   });
 });
