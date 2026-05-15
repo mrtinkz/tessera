@@ -2,6 +2,7 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
+    exclude: ['**/node_modules/**', '**/dist/**', '.claude/**'],
     environment: 'happy-dom',
     coverage: {
       provider: 'v8',

@@ -12,6 +12,7 @@ import { deriveHmacKey, getSalt } from '../../src/core/crypto';
 
 describe('lockout', () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
     resetLockout();
     localStorage.clear();
     sessionStorage.clear();
@@ -164,31 +165,43 @@ describe('lockout', () => {
   it('signLockoutRecord does not throw when localStorage.setItem throws', async () => {
     const salt = await getSalt();
     const hmacKey = await deriveHmacKey('246813', salt);
-    vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+    const spy = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
       throw new Error('Storage unavailable');
     });
-    await expect(signLockoutRecord(hmacKey)).resolves.toBeUndefined();
+    try {
+      await expect(signLockoutRecord(hmacKey)).resolves.toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   // Covers lockout.ts line 77: catch in verifyLockoutRecord when localStorage.getItem throws
   it('verifyLockoutRecord returns true when localStorage.getItem throws', async () => {
     const salt = await getSalt();
     const hmacKey = await deriveHmacKey('246813', salt);
-    vi.spyOn(localStorage, 'getItem').mockImplementation((key: string) => {
+    const spy = vi.spyOn(localStorage, 'getItem').mockImplementation((key: string) => {
       if (key === 'tessera_lockout_sig') throw new Error('Storage unavailable');
       return null;
     });
-    const result = await verifyLockoutRecord(hmacKey);
-    expect(result).toBe(true);
+    try {
+      const result = await verifyLockoutRecord(hmacKey);
+      expect(result).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   // Covers lockout.ts line 179: catch block when localStorage.clear throws
   it('performWipe does not throw when localStorage.clear throws', () => {
-    vi.spyOn(localStorage, 'clear').mockImplementation(() => {
+    const spy = vi.spyOn(localStorage, 'clear').mockImplementation(() => {
       throw new Error('Storage unavailable');
     });
-    // Should swallow the error and not throw
-    expect(() => performWipe()).not.toThrow();
+    try {
+      // Should swallow the error and not throw
+      expect(() => performWipe()).not.toThrow();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   // Covers lockout.ts line 191: catch block when document.cookie getter throws
