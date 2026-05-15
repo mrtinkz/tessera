@@ -401,6 +401,26 @@ describe('SessionStorageAdapter', () => {
     expect(mgr.allKeys('session').length).toBe(2);
   });
 
+  // claim mode without idb: handleClaimWrite false branch (if this.idb is null)
+  it('should silently skip IDB claim when no idb adapter is configured', async () => {
+    // No idb adapter set → handleClaimWrite skips the idb.put path
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    // This exercises the false branch of `if (this.idb)` in handleClaimWrite
+    await adapter.setItem('claim-no-idb', 'val', { mode: 'claim' });
+    // Without idb, the claim token is stored in sessionStorage but nothing in IDB
+    // Reading it back without idb returns null (no claim source)
+    const result = await adapter.getItem('claim-no-idb');
+    expect(result).toBeNull();
+  });
+
+  // buildMeta false branches: low sensitivity has no ttl/maxReads/halfLifeHard defaults
+  it('should store and retrieve a low-sensitivity item (no ttl/maxReads/halfLife defaults)', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('low-sens', 'low-val', { sensitivity: 'low' });
+    const result = await adapter.getItem('low-sens');
+    expect(result).toBe('low-val');
+  });
+
   // addHoneyKeys: set a honey manager that is enabled with count > 0
   it('should add honey keys when honey manager is enabled', async () => {
     const fakeMgr = {

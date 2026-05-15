@@ -385,6 +385,22 @@ describe('LocalStorageAdapter', () => {
     expect(mgr.allKeys('local').length).toBe(2);
   });
 
+  // getRawKey returns the developer key unchanged when session is locked
+  it('should return the raw developer key unchanged when session is locked', async () => {
+    const adapter = new LocalStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    session.lock();
+    const result = await adapter.getRawKey!('my-key');
+    expect(result).toBe('my-key');
+  });
+
+  // buildMeta false branches: low sensitivity has no ttl/maxReads/halfLifeHard defaults
+  it('should store and retrieve a low-sensitivity item (no ttl/maxReads/halfLife defaults)', async () => {
+    const adapter = new LocalStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('low-sens', 'low-val', { sensitivity: 'low' });
+    const result = await adapter.getItem('low-sens');
+    expect(result).toBe('low-val');
+  });
+
   // wipeHighSensitivity: items with 'high' sensitivity are removed
   it('should wipe high-sensitivity items via wipeHighSensitivity', async () => {
     const adapter = new LocalStorageAdapter(resolveConfig(), session, new TesseraEmitter());

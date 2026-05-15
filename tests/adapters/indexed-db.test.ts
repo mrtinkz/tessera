@@ -372,6 +372,33 @@ describe('IndexedDbAdapter', () => {
     expect(await adapter.get('json-catch-store', 'valid-hi')).toBeUndefined();
   });
 
+  // readCount NaN branch: inject metadata with non-finite readCount
+  it('should normalise non-finite readCount in IDB metadata', async () => {
+    const adapter = new IndexedDbAdapter(resolveConfig(), session, new TesseraEmitter());
+    const cryptoKey = session.getKey();
+    const meta = JSON.stringify({
+      writeTime: Date.now(),
+      readCount: Number.NaN,
+      sensitivity: 'low',
+      onSuspicion: 'wipe',
+    });
+    const encMeta = await encryptWithSalt(cryptoKey, meta);
+    const encVal = await encryptWithSalt(cryptoKey, JSON.stringify('nan-idb-val'));
+    const storageKey = await session.rotateKeyName('nan-idb-key');
+    await overwriteIdbValue('nan-idb-store', storageKey, `${encMeta}.${encVal}`);
+
+    const result = await adapter.get('nan-idb-store', 'nan-idb-key');
+    expect(result).toBe('nan-idb-val');
+  });
+
+  // buildMeta false branches: low sensitivity has no ttl/maxReads/halfLifeHard defaults
+  it('should store and retrieve a low-sensitivity IDB item (no ttl/maxReads/halfLife defaults)', async () => {
+    const adapter = new IndexedDbAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.put('low-store', 'low-key', 'low-val', { sensitivity: 'low' });
+    const result = await adapter.get('low-store', 'low-key');
+    expect(result).toBe('low-val');
+  });
+
   // applyOnSuspicion – wipe (default)
   it('should wipe the key when onSuspicion is "wipe" (default) and value HMAC fails', async () => {
     const events = new TesseraEmitter();

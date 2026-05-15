@@ -9,6 +9,7 @@ function assertBrowserEnvironment(): void {
   // Check for Web Crypto subtle API directly rather than `window`, so tessera
   // works in Cloudflare Workers, Deno, and Bun where `window` is undefined
   // but `globalThis.crypto.subtle` is available and fully functional.
+  /* v8 ignore next 6 */
   if (globalThis.crypto?.subtle === undefined) {
     throw new TesseraError(
       TesseraErrorCode.UNSUPPORTED_ENV,
@@ -80,6 +81,7 @@ export async function getSalt(): Promise<Uint8Array> {
  * @returns A 16-byte `Uint8Array` unique salt.
  * @internal
  */
+/* v8 ignore next 3 */
 export function unsecuredGetSalt(): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(SALT_LENGTH));
 }

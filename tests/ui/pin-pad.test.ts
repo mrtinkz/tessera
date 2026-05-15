@@ -252,6 +252,25 @@ describe('renderPinPad — hit-test zone logic', () => {
     expect(onUnlock).toHaveBeenCalledTimes(1);
   });
 
+  it('fires onUnlock via a touchend event on the canvas', () => {
+    const onUnlock = vi.fn();
+    const { canvas } = setupWithMockCtx({ onUnlock, length: 6, randomize: false });
+
+    // Dispatch 6 touchend events, each with a changedTouches list pointing at
+    // digit cell (0, 0) — the first cell in the non-randomized layout.
+    for (let i = 0; i < 6; i++) {
+      const touch = new Touch({ identifier: i, target: canvas, clientX: 30, clientY: 30 });
+      const event = new TouchEvent('touchend', {
+        changedTouches: [touch],
+        bubbles: true,
+        cancelable: true,
+      });
+      canvas.dispatchEvent(event);
+    }
+
+    expect(onUnlock).toHaveBeenCalledTimes(1);
+  });
+
   it('re-randomizes digit order after a completed entry when randomize: true', () => {
     // Run two complete entries; with high probability the digit order changes.
     const passes: string[] = [];

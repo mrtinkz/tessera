@@ -390,6 +390,14 @@ describe('CookieAdapter', () => {
     expect(result).toBe('legacy-idb-val');
   });
 
+  // buildMeta false branches: low sensitivity has no ttl/maxReads/halfLifeHard defaults
+  it('should store and retrieve a low-sensitivity cookie (no ttl/maxReads/halfLife defaults)', async () => {
+    const adapter = new CookieAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.set('low-sens-c', 'low-val', { sensitivity: 'low' });
+    const result = await adapter.get('low-sens-c');
+    expect(result).toBe('low-val');
+  });
+
   // HMAC failure on meta (corrupt meta portion)
   it('should emit hmac-failure event when meta decryption fails', async () => {
     const events = new TesseraEmitter();

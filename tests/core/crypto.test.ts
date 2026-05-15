@@ -263,6 +263,33 @@ describe('crypto KAT — PBKDF2-SHA-256 + AES-256-GCM (fixed vector)', () => {
   });
 });
 
+describe('crypto.validatePasscode — whitespace branch', () => {
+  it('should reject a passcode that is entirely whitespace (≥6 chars but all spaces)', async () => {
+    const salt = await getSalt();
+    await expect(deriveKey('      ', salt)).rejects.toThrow();
+  });
+});
+
+describe('crypto.decrypt — short payload branch', () => {
+  it('should return ok:false for a payload shorter than IV_LENGTH+1 bytes', async () => {
+    const key = await makeKey();
+    // Base64 of 5 bytes — well below the 13-byte minimum (IV_LENGTH=12 + 1)
+    const shortPayload = btoa(String.fromCodePoint(1, 2, 3, 4, 5));
+    const result = await decrypt(key, shortPayload);
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe('crypto.decryptFull — short payload branch', () => {
+  it('should return ok:false for a payload shorter than SALT+IV+1 bytes', async () => {
+    const key = await makeKey();
+    // Base64 of 10 bytes — well below the 29-byte minimum (SALT=16 + IV=12 + 1)
+    const shortPayload = btoa(String.fromCodePoint(1, 2, 3, 4, 5, 6, 7, 8, 9, 10));
+    const result = await decryptFull(key, shortPayload);
+    expect(result.ok).toBe(false);
+  });
+});
+
 describe('crypto.deriveHmacKey', () => {
   it('should produce a non-extractable HMAC-SHA256 key', async () => {
     const salt = await getSalt();

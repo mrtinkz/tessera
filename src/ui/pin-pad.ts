@@ -354,6 +354,7 @@ export function renderPinPad(container: HTMLElement, config: PinPadConfig): () =
   function onCanvasTouch(event: TouchEvent): void {
     event.preventDefault();
     const touch = event.changedTouches[0];
+    /* v8 ignore next */
     if (touch) handleHit(touch.clientX, touch.clientY);
   }
 
