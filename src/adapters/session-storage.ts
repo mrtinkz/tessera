@@ -436,6 +436,7 @@ export class SessionStorageAdapter implements IStorageAdapter {
       sensitivity,
     };
 
+    // eslint-disable-next-line security/detect-object-injection
     const defaults = SENSITIVITY_DEFAULTS[sensitivity];
     const ttl = options?.ttl ?? defaults?.ttl ?? this.config.defaults?.ttl;
     if (ttl !== undefined) meta.ttl = ttl;

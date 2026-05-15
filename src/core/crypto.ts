@@ -53,6 +53,7 @@ function base64ToUint8Array(base64: string): Uint8Array {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) {
+    // eslint-disable-next-line security/detect-object-injection
     bytes[i] = binary.codePointAt(i)!;
   }
   return bytes;
@@ -304,6 +305,7 @@ export async function decryptFull(key: CryptoKey, payload: string): Promise<Resu
  */
 export function zeroPasscode(passcode: Uint8Array): void {
   for (let i = 0; i < passcode.length; i++) {
+    // eslint-disable-next-line security/detect-object-injection
     passcode[i] = 0;
   }
 }

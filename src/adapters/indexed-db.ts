@@ -24,7 +24,7 @@ function openDb(): Promise<IDBDatabase> {
   return new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
 
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (): void => {
       const db = request.result;
       if (!db.objectStoreNames.contains('tessera_data')) {
         db.createObjectStore('tessera_data', { keyPath: ['store', 'key'] });
@@ -37,7 +37,7 @@ function openDb(): Promise<IDBDatabase> {
       }
     };
 
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = (): void => resolve(request.result);
     request.addEventListener('error', () =>
       reject(new TesseraError(TesseraErrorCode.STORAGE_QUOTA, 'Failed to open IndexedDB.')),
     );
@@ -100,11 +100,11 @@ export class IndexedDbAdapter implements IIDBAdapter {
       const tx = db.transaction('tessera_data', 'readwrite');
       const store = tx.objectStore('tessera_data');
       store.put({ store: storeName, key: storageKey, value: packed, updatedAt: Date.now() });
-      tx.oncomplete = () => {
+      tx.oncomplete = (): void => {
         db.close();
         resolve();
       };
-      tx.addEventListener('error', () => {
+      tx.addEventListener('error', (): void => {
         db.close();
         reject(new TesseraError(TesseraErrorCode.STORAGE_QUOTA, 'IndexedDB write failed.'));
       });
@@ -135,13 +135,13 @@ export class IndexedDbAdapter implements IIDBAdapter {
       const tx = db.transaction('tessera_data', 'readonly');
       const store = tx.objectStore('tessera_data');
       const request = store.get([storeName, storageKey]);
-      request.onsuccess = () => {
+      request.onsuccess = (): void => {
         resolve(request.result);
       };
-      request.addEventListener('error', () => {
+      request.addEventListener('error', (): void => {
         reject(new TesseraError(TesseraErrorCode.STORAGE_QUOTA, 'IndexedDB read failed.'));
       });
-      tx.oncomplete = () => {
+      tx.oncomplete = (): void => {
         db.close();
       };
     });
@@ -175,11 +175,11 @@ export class IndexedDbAdapter implements IIDBAdapter {
         value: generateNoiseBlock(),
         updatedAt: Date.now(),
       });
-      tx.oncomplete = () => {
+      tx.oncomplete = (): void => {
         db.close();
         resolve();
       };
-      tx.addEventListener('error', () => {
+      tx.addEventListener('error', (): void => {
         db.close();
         reject();
       });
@@ -190,11 +190,11 @@ export class IndexedDbAdapter implements IIDBAdapter {
       const tx = db2.transaction('tessera_data', 'readwrite');
       const store = tx.objectStore('tessera_data');
       store.delete([storeName, storageKey]);
-      tx.oncomplete = () => {
+      tx.oncomplete = (): void => {
         db2.close();
         resolve();
       };
-      tx.addEventListener('error', () => {
+      tx.addEventListener('error', (): void => {
         db2.close();
         reject();
       });
@@ -208,7 +208,7 @@ export class IndexedDbAdapter implements IIDBAdapter {
       const tx = db.transaction('tessera_data', 'readwrite');
       const store = tx.objectStore('tessera_data');
       const request = store.openCursor();
-      request.onsuccess = () => {
+      request.onsuccess = (): void => {
         const cursor = request.result;
         if (cursor) {
           const data = cursor.value as { store: string };
@@ -218,11 +218,11 @@ export class IndexedDbAdapter implements IIDBAdapter {
           cursor.continue();
         }
       };
-      tx.oncomplete = () => {
+      tx.oncomplete = (): void => {
         db.close();
         resolve();
       };
-      tx.addEventListener('error', () => {
+      tx.addEventListener('error', (): void => {
         db.close();
         reject();
       });
@@ -345,7 +345,7 @@ export class IndexedDbAdapter implements IIDBAdapter {
       const tx = db.transaction('tessera_data', 'readwrite');
       const store = tx.objectStore('tessera_data');
       const req = store.get([resolvedStore, storageKey]);
-      req.onsuccess = () => {
+      req.onsuccess = (): void => {
         const record = req.result as { store: string; key: string; value: string } | undefined;
         if (!record) {
           resolve();
@@ -364,11 +364,11 @@ export class IndexedDbAdapter implements IIDBAdapter {
           updatedAt: Date.now(),
         });
       };
-      tx.oncomplete = () => {
+      tx.oncomplete = (): void => {
         db.close();
         resolve();
       };
-      tx.addEventListener('error', () => {
+      tx.addEventListener('error', (): void => {
         db.close();
         reject(
           new TesseraError(TesseraErrorCode.STORAGE_QUOTA, 'IndexedDB updateMetadata failed.'),
@@ -389,18 +389,18 @@ export class IndexedDbAdapter implements IIDBAdapter {
         const objStore = tx.objectStore('tessera_data');
         const results: Array<{ store: string; key: string; value: string }> = [];
         const req = objStore.openCursor();
-        req.onsuccess = () => {
+        req.onsuccess = (): void => {
           const cursor = req.result;
           if (cursor) {
             results.push(cursor.value as { store: string; key: string; value: string });
             cursor.continue();
           }
         };
-        tx.oncomplete = () => {
+        tx.oncomplete = (): void => {
           db.close();
           resolve(results);
         };
-        tx.addEventListener('error', () => {
+        tx.addEventListener('error', (): void => {
           db.close();
           reject();
         });
@@ -423,11 +423,11 @@ export class IndexedDbAdapter implements IIDBAdapter {
         await new Promise<void>((resolve2, reject2) => {
           const tx2 = db2.transaction('tessera_data', 'readwrite');
           tx2.objectStore('tessera_data').delete([record.store, record.key]);
-          tx2.oncomplete = () => {
+          tx2.oncomplete = (): void => {
             db2.close();
             resolve2();
           };
-          tx2.addEventListener('error', () => {
+          tx2.addEventListener('error', (): void => {
             db2.close();
             reject2();
           });
@@ -468,6 +468,7 @@ export class IndexedDbAdapter implements IIDBAdapter {
       sensitivity,
     };
 
+    // eslint-disable-next-line security/detect-object-injection
     const defaults = SENSITIVITY_DEFAULTS[sensitivity];
     const ttl = options?.ttl ?? defaults?.ttl ?? this.config.defaults?.ttl;
     if (ttl !== undefined) meta.ttl = ttl;

@@ -59,7 +59,7 @@ export class SuspicionEngine {
 
   private setupVisibilityChange(): void {
     if (typeof document === 'undefined') return;
-    this.visibilityListener = () => {
+    this.visibilityListener = (): void => {
       if (document.hidden) {
         this.hiddenAt = Date.now();
       } else if (this.hiddenAt > 0) {

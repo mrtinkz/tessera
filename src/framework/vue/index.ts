@@ -13,13 +13,13 @@ export function useTessera(config?: TesseraConfig): UseTesseraReturn {
   const vaultRef = ref<IVault | null>(null);
   const lockedRef = ref(true);
 
-  const unlock = async (passcode: string) => {
+  const unlock = async (passcode: string): Promise<void> => {
     const v = await Tessera.unlock(passcode, config);
     vaultRef.value = v;
     lockedRef.value = false;
   };
 
-  const lock = () => {
+  const lock = (): void => {
     vaultRef.value?.lock();
     vaultRef.value = null;
     lockedRef.value = true;
@@ -36,5 +36,3 @@ export function useTessera(config?: TesseraConfig): UseTesseraReturn {
     lock,
   };
 }
-
-

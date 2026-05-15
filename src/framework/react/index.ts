@@ -27,12 +27,10 @@ export function useTessera(config?: TesseraConfig): UseTesseraReturn {
   }, [vault]);
 
   useEffect(() => {
-    return () => {
+    return (): void => {
       vault?.lock();
     };
   }, [vault]);
 
   return { vault, isLocked, unlock, lock };
 }
-
-

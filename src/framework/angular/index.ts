@@ -23,13 +23,10 @@ export class TesseraService {
 
 @NgModule()
 export class TesseraModule {
-  static forRoot(config?: TesseraConfig) {
+  static forRoot(config?: TesseraConfig): { ngModule: typeof TesseraModule; providers: unknown[] } {
     return {
       ngModule: TesseraModule,
-      providers: [
-        TesseraService,
-        { provide: 'TESSERA_CONFIG', useValue: config },
-      ],
+      providers: [TesseraService, { provide: 'TESSERA_CONFIG', useValue: config }],
     };
   }
 }

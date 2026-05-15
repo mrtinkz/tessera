@@ -52,9 +52,13 @@ function shuffleArray<T>(array: readonly T[]): T[] {
       random = crypto.getRandomValues(new Uint32Array(1))[0]!;
     } while (random >= maxValid);
     const j = Math.floor(random / bucketSize);
+    // eslint-disable-next-line security/detect-object-injection
     const a = copy[i]!;
+    // eslint-disable-next-line security/detect-object-injection
     const b = copy[j]!;
+    // eslint-disable-next-line security/detect-object-injection
     copy[i] = b;
+    // eslint-disable-next-line security/detect-object-injection
     copy[j] = a;
   }
   return copy;
@@ -130,6 +134,7 @@ function renderCanvas(
   for (let row = 0; row < GRID_ROWS; row++) {
     for (let col = 0; col < GRID_COLS; col++) {
       const idx = row * GRID_COLS + col;
+      // eslint-disable-next-line security/detect-object-injection
       const cell = cells[idx];
       if (!cell) continue;
 
@@ -291,6 +296,7 @@ export function renderPinPad(container: HTMLElement, config: PinPadConfig): () =
     // Copy into a Uint8Array so we can zero it after use.
     const pinBytes = new Uint8Array(passcode.length);
     for (let i = 0; i < passcode.length; i++) {
+      // eslint-disable-next-line security/detect-object-injection
       pinBytes[i] = passcode.codePointAt(i)!;
     }
 
@@ -308,6 +314,7 @@ export function renderPinPad(container: HTMLElement, config: PinPadConfig): () =
     } finally {
       // Zero the byte buffer regardless of whether onUnlock throws.
       for (let i = 0; i < pinBytes.length; i++) {
+        // eslint-disable-next-line security/detect-object-injection
         pinBytes[i] = 0;
       }
     }

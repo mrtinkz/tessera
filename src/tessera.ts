@@ -148,6 +148,7 @@ export const Tessera = {
         } else {
           const raw = atob(stored);
           salt = new Uint8Array(raw.length);
+          // eslint-disable-next-line security/detect-object-injection
           for (let i = 0; i < raw.length; i++) salt[i] = raw.codePointAt(i)!;
         }
       } catch {
