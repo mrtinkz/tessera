@@ -1,6 +1,19 @@
-# tessera
+<p align="center">
+  <img src="./assets/logo.svg" width="80" alt="tessera" />
+</p>
 
-> _Your data. Your token. Your rules._
+<h1 align="center">tessera</h1>
+
+<p align="center"><em>Your data. Your passcode. Your rules.</em></p>
+
+<p align="center">
+  <a href="https://github.com/mrtinkz/tessera/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/mrtinkz/tessera/ci.yml?branch=main&label=build&style=flat-square" alt="Build Status"/></a>
+  <a href="https://www.npmjs.com/package/@mrtinkz/tessera"><img src="https://img.shields.io/npm/v/@mrtinkz/tessera?style=flat-square" alt="npm version"/></a>
+  <a href="https://bundlephobia.com/package/@mrtinkz/tessera"><img src="https://img.shields.io/bundlephobia/minzip/@mrtinkz/tessera?style=flat-square&label=gzip" alt="Bundle size"/></a>
+  <a href="https://www.npmjs.com/package/@mrtinkz/tessera"><img src="https://img.shields.io/npm/dm/@mrtinkz/tessera?style=flat-square" alt="npm downloads"/></a>
+  <img src="https://img.shields.io/badge/dependencies-0-brightgreen?style=flat-square" alt="Zero dependencies"/>
+  <img src="https://img.shields.io/badge/TypeScript-5-blue?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript"/>
+</p>
 
 A zero-dependency TypeScript/JavaScript library (~10 KB gzip) that wraps browser storage — `localStorage`, `sessionStorage`, `IndexedDB`, and cookies — with AES-256-GCM encryption. The encryption key is derived from a user passcode and **never leaves the browser**. No server round-trips. No cloud keys. No external dependencies.
 
