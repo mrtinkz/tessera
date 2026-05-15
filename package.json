@@ -7,6 +7,9 @@
     "url": "https://github.com/mrtinkz/tessera"
   },
   "license": "MIT",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
