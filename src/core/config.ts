@@ -69,6 +69,8 @@ export function resolveConfig(config?: EnhancedTesseraConfig): ResolvedConfig {
     if (config.honeyKeys?.count !== undefined) enhanced.honeyKeys.count = config.honeyKeys.count;
     if (config.honeyKeys?.sensitivity !== undefined)
       enhanced.honeyKeys.sensitivity = config.honeyKeys.sensitivity;
+    if (config.honeyKeys?.aliasGenerator !== undefined)
+      enhanced.honeyKeys.aliasGenerator = config.honeyKeys.aliasGenerator;
     if (config.halfLife?.soft !== undefined) enhanced.halfLife.soft = config.halfLife.soft;
     if (config.halfLife?.hard !== undefined) enhanced.halfLife.hard = config.halfLife.hard;
     if (config.suspicion) {

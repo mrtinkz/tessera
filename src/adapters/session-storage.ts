@@ -70,6 +70,11 @@ export class SessionStorageAdapter implements IStorageAdapter {
       }
     }
 
+    if (this.honeyManager?.isDecoyAlias('session', key)) {
+      this.suspicion?.recordHoneyHit('session');
+      return null;
+    }
+
     const storageKey = await this.session.rotateKeyNameSafe(key);
     if (storageKey === null) return null;
     const raw = this.rawGetItem(storageKey);
@@ -101,14 +106,14 @@ export class SessionStorageAdapter implements IStorageAdapter {
     if (mode === 'split') {
       await this.handleSplitWrite(cryptoKey, value, key, storageKey, options);
       this.keyRegistry.add(key);
-      await this.addHoneyKeys('session');
+      this.scheduleHoneyKeys('session');
       return;
     }
 
     if (mode === 'claim') {
       await this.handleClaimWrite(cryptoKey, value, key, storageKey, options);
       this.keyRegistry.add(key);
-      await this.addHoneyKeys('session');
+      this.scheduleHoneyKeys('session');
       return;
     }
 
@@ -120,7 +125,7 @@ export class SessionStorageAdapter implements IStorageAdapter {
     this.keyRegistry.add(key);
     this.sensitivityRegistry.set(key, sensitivity);
     this.session.touch();
-    await this.addHoneyKeys('session');
+    this.scheduleHoneyKeys('session');
   }
 
   async removeItem(key: string): Promise<void> {
@@ -249,7 +254,8 @@ export class SessionStorageAdapter implements IStorageAdapter {
   }
 
   async keys(): Promise<string[]> {
-    return [...this.keyRegistry];
+    const decoys = this.honeyManager?.allDecoyAliases('session') ?? [];
+    return [...this.keyRegistry, ...decoys];
   }
 
   async getRawKey(developerKey: string): Promise<string> {
@@ -263,6 +269,11 @@ export class SessionStorageAdapter implements IStorageAdapter {
   async exportItem(alias: string): Promise<ExportedItem | null> {
     const cryptoKey = this.session.getKeySafe();
     if (cryptoKey === null) return null;
+
+    if (this.honeyManager?.isDecoyAlias('session', alias)) {
+      this.suspicion?.recordHoneyHit('session');
+      return null;
+    }
 
     const storageKey = await this.session.rotateKeyNameSafe(alias);
     if (storageKey === null) return null;
@@ -567,20 +578,29 @@ export class SessionStorageAdapter implements IStorageAdapter {
     this.rawSetItem(storageKey, `${encryptedMeta}.${valueB64}`);
   }
 
-  private async addHoneyKeys(backend: string): Promise<void> {
+  private scheduleHoneyKeys(backend: string): void {
     const mgr = this.honeyManager as HoneyKeyManager | null;
     if (!mgr?.isEnabled) return;
     const needed = this.config.honeyKeys.count - mgr.allKeys(backend).length;
     if (needed <= 0) return;
-    const cryptoKey = this.session.getKeySafe();
-    /* v8 ignore next */
-    if (!cryptoKey) return;
-    const existing = await this.keys();
-    const honeyKeys = mgr.generateHoneyKeys(backend, existing, needed);
-    for (const honeyKey of honeyKeys) {
-      const ct = await generateHoneyCiphertext(cryptoKey);
-      this.rawSetItem(honeyKey, ct);
+    const existingAliases = [...this.keyRegistry];
+    const honeyStorageKeys = mgr.generateHoneyKeys(backend, existingAliases, needed);
+    for (const storageKey of honeyStorageKeys) {
+      mgr.assignDecoyAlias(backend, storageKey, existingAliases);
+      const delay = 50 + Math.floor(Math.random() * 1950);
+      setTimeout(() => {
+        void this.writeHoneyKey(storageKey);
+      }, delay);
     }
+  }
+
+  private async writeHoneyKey(storageKey: string): Promise<void> {
+    const cryptoKey = this.session.getKeySafe();
+    if (!cryptoKey) return;
+    const ct = await generateHoneyCiphertext(cryptoKey);
+    // Don't write if wipeAll cleared the registry (e.g. lockdown fired during crypto)
+    if (!this.honeyManager?.isHoney('session', storageKey)) return;
+    this.rawSetItem(storageKey, ct);
   }
 
   private async applyOnSuspicion(

@@ -231,6 +231,7 @@ describe('Tessera.unlock', () => {
   // wipeHighSensitivity via suspicion lockdown (_simulateHoneyHit)
   it('should lock and wipe high-sensitivity keys on suspicion lockdown', async () => {
     const vault = await Tessera.unlock('246813', {
+      debug: true,
       suspicion: { thresholds: { lockdown: 1 } },
     } as Parameters<typeof Tessera.unlock>[1]);
     await vault.local.setItem('secure', 'sensitive', { sensitivity: 'high' });
@@ -300,6 +301,7 @@ describe('Tessera.unlock', () => {
 
   it('lockdown: suspicion-lockdown event lists wiped key paths', async () => {
     const vault = await Tessera.unlock('246813', {
+      debug: true,
       suspicion: { thresholds: { lockdown: 1 } },
     } as Parameters<typeof Tessera.unlock>[1]);
 
@@ -397,13 +399,18 @@ describe('Tessera.unlock', () => {
   // wipeAll on lockdown: every t_ entry is removed — real, honey, and low-sensitivity
   it('lockdown nukes all t_ entries including honey and low-sensitivity keys', async () => {
     const vault = await Tessera.unlock('246813', {
+      debug: true,
       honeyKeys: { count: 2 },
       suspicion: { thresholds: { lockdown: 1 } },
     } as Parameters<typeof Tessera.unlock>[1]);
 
     // Write keys at different sensitivity levels
+    vi.useFakeTimers();
     await vault.local.setItem('low-key', 'lo', { sensitivity: 'low' });
     await vault.local.setItem('high-key', 'hi', { sensitivity: 'high' });
+    vi.advanceTimersByTime(2000);
+    vi.useRealTimers();
+    await new Promise((r) => setTimeout(r, 100));
 
     // Confirm t_ entries exist (2 real + 2 honey)
     const tKeysBefore = Object.keys(localStorage).filter((k) => k.startsWith('t_'));
@@ -428,8 +435,12 @@ describe('Tessera.unlock', () => {
   // cleanOrphanedHoneyKeys fires at unlock and wipes orphans from prior session
   it('unlock fires background orphan cleanup that wipes orphaned honey keys', async () => {
     // Session 1: write key + generate honey keys, then lock
-    const vault1 = await Tessera.unlock('246813', { honeyKeys: { count: 2 } });
+    const vault1 = await Tessera.unlock('246813', { debug: true, honeyKeys: { count: 2 } });
+    vi.useFakeTimers();
     await vault1.local.setItem('real', 'value');
+    vi.runAllTimers();
+    vi.useRealTimers();
+    await new Promise((r) => setTimeout(r, 100));
     const honeyKeys1 = vault1._honeyStorageKeys('local');
     expect(honeyKeys1.length).toBe(2);
     vault1.lock();
@@ -440,7 +451,7 @@ describe('Tessera.unlock', () => {
     }
 
     // Session 2: unlock fires cleanOrphanedHoneyKeys in background
-    const vault2 = await Tessera.unlock('246813', { honeyKeys: { count: 2 } });
+    const vault2 = await Tessera.unlock('246813', { debug: true, honeyKeys: { count: 2 } });
 
     // Allow background microtasks to settle
     await new Promise((r) => setTimeout(r, 50));
@@ -457,8 +468,12 @@ describe('Tessera.unlock', () => {
   });
 
   it('direct localStorage.getItem on a honey key records a honey hit', async () => {
-    const vault = await Tessera.unlock('246813', { honeyKeys: { count: 3 } });
+    const vault = await Tessera.unlock('246813', { debug: true, honeyKeys: { count: 3 } });
+    vi.useFakeTimers();
     await vault.local.setItem('mykey', 'myvalue');
+    vi.runAllTimers();
+    vi.useRealTimers();
+    await new Promise((r) => setTimeout(r, 100));
     const honeyKeys = vault._honeyStorageKeys('local');
     expect(honeyKeys.length).toBeGreaterThan(0);
     let honeyHit = false;
@@ -471,8 +486,12 @@ describe('Tessera.unlock', () => {
   });
 
   it('proxy is removed on vault.lock()', async () => {
-    const vault = await Tessera.unlock('246813', { honeyKeys: { count: 3 } });
+    const vault = await Tessera.unlock('246813', { debug: true, honeyKeys: { count: 3 } });
+    vi.useFakeTimers();
     await vault.local.setItem('mykey', 'myvalue');
+    vi.runAllTimers();
+    vi.useRealTimers();
+    await new Promise((r) => setTimeout(r, 100));
     const honeyKeys = vault._honeyStorageKeys('local');
     expect(honeyKeys.length).toBeGreaterThan(0);
     vault.lock();
@@ -496,8 +515,12 @@ describe('Tessera.unlock', () => {
   });
 
   it('proxy cleanup on terminate', async () => {
-    const vault = await Tessera.unlock('246813', { honeyKeys: { count: 3 } });
+    const vault = await Tessera.unlock('246813', { debug: true, honeyKeys: { count: 3 } });
+    vi.useFakeTimers();
     await vault.local.setItem('mykey', 'myvalue');
+    vi.runAllTimers();
+    vi.useRealTimers();
+    await new Promise((r) => setTimeout(r, 100));
     const honeyKeys = vault._honeyStorageKeys('local');
     expect(honeyKeys.length).toBeGreaterThan(0);
     vault.terminate();

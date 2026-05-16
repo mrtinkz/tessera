@@ -88,7 +88,7 @@ export class CookieAdapter implements ICookieAdapter {
 
     if (mode === 'claim') {
       await this.handleClaimWrite(cryptoKey, value, name, options);
-      await this.addHoneyKeys();
+      this.scheduleHoneyKeys();
       return;
     }
 
@@ -99,23 +99,32 @@ export class CookieAdapter implements ICookieAdapter {
     const packed = await this.packageValue(cryptoKey, value, metadata);
     this.writeCookie(name, packed, options);
     this.session.touch();
-    await this.addHoneyKeys();
+    this.scheduleHoneyKeys();
   }
 
-  private async addHoneyKeys(): Promise<void> {
+  private scheduleHoneyKeys(): void {
     const mgr = this.honeyManager as HoneyKeyManager | null;
     if (!mgr?.isEnabled) return;
     const needed = this.config.honeyKeys.count - mgr.allKeys('cookie').length;
     if (needed <= 0) return;
-    const cryptoKey = this.session.getKeySafe();
-    /* v8 ignore next */
-    if (!cryptoKey) return;
-    const existing = [...this.cookieNames];
-    const honeyKeys = mgr.generateHoneyKeys('cookie', existing, needed);
-    for (const honeyKey of honeyKeys) {
-      const ct = await generateHoneyCiphertext(cryptoKey);
-      this.writeCookieRaw(honeyKey, ct);
+    const existingAliases = [...this.cookieNames];
+    const honeyStorageKeys = mgr.generateHoneyKeys('cookie', existingAliases, needed);
+    for (const storageKey of honeyStorageKeys) {
+      mgr.assignDecoyAlias('cookie', storageKey, existingAliases);
+      const delay = 50 + Math.floor(Math.random() * 1950);
+      setTimeout(() => {
+        void this.writeHoneyCookie(storageKey);
+      }, delay);
     }
+  }
+
+  private async writeHoneyCookie(storageKey: string): Promise<void> {
+    const cryptoKey = this.session.getKeySafe();
+    if (!cryptoKey) return;
+    const ct = await generateHoneyCiphertext(cryptoKey);
+    // Don't write if wipeAll cleared the registry (e.g. lockdown fired during crypto)
+    if (!this.honeyManager?.isHoney('cookie', storageKey)) return;
+    this.writeCookieRaw(storageKey, ct);
   }
 
   async remove(name: string): Promise<void> {

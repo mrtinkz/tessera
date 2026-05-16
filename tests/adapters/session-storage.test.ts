@@ -297,6 +297,9 @@ describe('SessionStorageAdapter', () => {
       allKeys: () => [] as string[],
       generateHoneyKeys: () => [] as string[],
       isHoney: (_backend: string, _key: string) => true,
+      isDecoyAlias: () => false,
+      allDecoyAliases: () => [] as string[],
+      assignDecoyAlias: () => {},
       remove: () => {},
       clearBackend: () => {},
     };
@@ -406,8 +409,12 @@ describe('SessionStorageAdapter', () => {
     const adapter = new SessionStorageAdapter(config, session, new TesseraEmitter());
     adapter.setHoneyManager(mgr);
 
+    vi.useFakeTimers();
     await adapter.setItem('low-key', 'lo', { sensitivity: 'low' });
     await adapter.setItem('high-key', 'hi', { sensitivity: 'high' });
+    vi.runAllTimers();
+    vi.useRealTimers();
+    await new Promise((r) => setTimeout(r, 100));
     expect(mgr.allKeys('session').length).toBe(2);
 
     const tKeysBefore = Object.keys(sessionStorage).filter((k) => k.startsWith('t_'));
@@ -433,7 +440,11 @@ describe('SessionStorageAdapter', () => {
     const mgr1 = new HoneyKeyManager(config);
     const adapter1 = new SessionStorageAdapter(config, session, new TesseraEmitter());
     adapter1.setHoneyManager(mgr1);
+    vi.useFakeTimers();
     await adapter1.setItem('persist', 'still-here', { sensitivity: 'low' });
+    vi.advanceTimersByTime(2000);
+    vi.useRealTimers();
+    await new Promise((r) => setTimeout(r, 100));
     const orphanKeys = mgr1.allKeys('session');
     expect(orphanKeys.length).toBe(2);
 
@@ -693,12 +704,19 @@ describe('SessionStorageAdapter', () => {
 
   // addHoneyKeys: set a honey manager that is enabled with count > 0
   it('should add honey keys when honey manager is enabled', async () => {
+    const honeySet = new Set<string>();
     const fakeMgr = {
       isEnabled: true,
       allKeys: (_backend: string) => [] as string[],
-      generateHoneyKeys: (_backend: string, _existing: string[], needed: number) =>
-        Array.from({ length: needed }, (_, i) => `honey_${i}`),
-      isHoney: () => false,
+      generateHoneyKeys: (_backend: string, _existing: string[], needed: number) => {
+        const keys = Array.from({ length: needed }, (_, i) => `honey_${i}`);
+        for (const k of keys) honeySet.add(k);
+        return keys;
+      },
+      isHoney: (_backend: string, key: string) => honeySet.has(key),
+      isDecoyAlias: () => false,
+      allDecoyAliases: () => [] as string[],
+      assignDecoyAlias: () => {},
       remove: () => {},
       clearBackend: () => {},
     };
@@ -708,8 +726,68 @@ describe('SessionStorageAdapter', () => {
     >[0]);
     const adapterWithHoney = new SessionStorageAdapter(config, session, new TesseraEmitter());
     adapterWithHoney.setHoneyManager(fakeMgr);
+    vi.useFakeTimers();
     await adapterWithHoney.setItem('h-key', 'h-val');
+    vi.runAllTimers();
+    vi.useRealTimers();
+    await new Promise((r) => setTimeout(r, 100));
     // Honey keys should appear in sessionStorage
     expect(sessionStorage.getItem('honey_0')).not.toBeNull();
+  });
+
+  // getItem with decoy alias triggers honey hit (covers session-storage.ts lines 74-75)
+  it('getItem returns null and records honey hit when key is a decoy alias', async () => {
+    const config = resolveConfig({ honeyKeys: { count: 2 } } as Parameters<
+      typeof resolveConfig
+    >[0]);
+    const { HoneyKeyManager } = await import('../../src/storage/honey');
+    const mgr = new HoneyKeyManager(config);
+    const events = new TesseraEmitter();
+    const suspicion = new SuspicionEngine(config, events);
+    const adapter = new SessionStorageAdapter(config, session, events, suspicion);
+    adapter.setHoneyManager(mgr);
+
+    await adapter.setItem('real-key', 'real-value');
+
+    const aliases = mgr.allDecoyAliases('session');
+    expect(aliases.length).toBeGreaterThan(0);
+
+    let honeyHits = 0;
+    events.on('honey-triggered', () => {
+      honeyHits++;
+    });
+
+    const result = await adapter.getItem(aliases[0]!);
+    expect(result).toBeNull();
+    expect(honeyHits).toBe(1);
+    suspicion.destroy();
+  });
+
+  // exportItem with decoy alias triggers honey hit (covers session-storage.ts lines 274-275)
+  it('exportItem returns null and records honey hit when alias is a decoy', async () => {
+    const config = resolveConfig({ honeyKeys: { count: 2 } } as Parameters<
+      typeof resolveConfig
+    >[0]);
+    const { HoneyKeyManager } = await import('../../src/storage/honey');
+    const mgr = new HoneyKeyManager(config);
+    const events = new TesseraEmitter();
+    const suspicion = new SuspicionEngine(config, events);
+    const adapter = new SessionStorageAdapter(config, session, events, suspicion);
+    adapter.setHoneyManager(mgr);
+
+    await adapter.setItem('real-key', 'real-value');
+
+    const aliases = mgr.allDecoyAliases('session');
+    expect(aliases.length).toBeGreaterThan(0);
+
+    let honeyHits = 0;
+    events.on('honey-triggered', () => {
+      honeyHits++;
+    });
+
+    const exported = await adapter.exportItem(aliases[0]!);
+    expect(exported).toBeNull();
+    expect(honeyHits).toBe(1);
+    suspicion.destroy();
   });
 });

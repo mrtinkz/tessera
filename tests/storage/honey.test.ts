@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { HoneyKeyManager } from '../../src/storage/honey';
 import { resolveConfig } from '../../src/core/config';
 import { Tessera } from '../../src/tessera';
@@ -126,6 +126,60 @@ describe('HoneyKeyManager', () => {
     const existing = ['t_existing0000000000000000000000000'];
     const keys = mgr.generateHoneyKeys('local', existing, 2);
     expect(keys.every((k) => !existing.includes(k))).toBe(true);
+  });
+
+  it('isDecoyAlias() returns false for a backend with no decoy aliases registered', () => {
+    const mgr = makeManager(3);
+    expect(mgr.isDecoyAlias('local', 'any-alias')).toBe(false);
+  });
+
+  it('allDecoyAliases() returns empty array for a backend with no decoy aliases registered', () => {
+    const mgr = makeManager(3);
+    expect(mgr.allDecoyAliases('local')).toHaveLength(0);
+  });
+
+  it('assignDecoyAlias() creates a decoy alias retrievable via isDecoyAlias', () => {
+    const mgr = makeManager(3);
+    mgr.generateHoneyKeys('local', [], 1);
+    mgr.assignDecoyAlias('local', mgr.allKeys('local')[0]!, []);
+    const aliases = mgr.allDecoyAliases('local');
+    expect(aliases.length).toBe(1);
+    expect(mgr.isDecoyAlias('local', aliases[0]!)).toBe(true);
+  });
+
+  it('assignDecoyAlias() uses aliasGenerator when configured', () => {
+    const config = resolveConfig({
+      honeyKeys: { count: 2, aliasGenerator: (i) => `myapp_custom_${i}` },
+    });
+    const mgr = new HoneyKeyManager(config);
+    mgr.assignDecoyAlias('local', 't_honey1', []);
+    expect(mgr.isDecoyAlias('local', 'myapp_custom_0')).toBe(true);
+  });
+
+  it('assignDecoyAlias() with aliasGenerator retries when result collides', () => {
+    let calls = 0;
+    const config = resolveConfig({
+      honeyKeys: { count: 2, aliasGenerator: () => (calls++ === 0 ? 'collide' : 'unique_alias') },
+    });
+    const mgr = new HoneyKeyManager(config);
+    mgr.assignDecoyAlias('local', 't_honey1', ['collide']);
+    expect(mgr.isDecoyAlias('local', 'unique_alias')).toBe(true);
+  });
+
+  it('syntheticAlias() falls back to cache_syncN after 50 failed attempts', () => {
+    const mgr = makeManager(3);
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    mgr.assignDecoyAlias('local', 't_honey1', ['cache_data']);
+    expect(mgr.isDecoyAlias('local', 'cache_sync0')).toBe(true);
+    vi.restoreAllMocks();
+  });
+
+  it('assignDecoyAlias() generates camelCase alias when existing aliases are camelCase', () => {
+    const mgr = makeManager(3);
+    mgr.assignDecoyAlias('local', 't_honey1', ['cacheData', 'prefMeta', 'syncInfo']);
+    const aliases = mgr.allDecoyAliases('local');
+    expect(aliases.length).toBe(1);
+    expect(/[a-z][A-Z]/.test(aliases[0]!)).toBe(true);
   });
 });
 

@@ -53,6 +53,15 @@ export interface HalfLifeConfig {
 export interface HoneyKeyConfig {
   count: number;
   sensitivity?: SensitivityLevel;
+  /**
+   * Override the synthetic decoy-alias generator with one that matches your
+   * app's exact key naming convention. Called once per honey slot with a
+   * zero-based index. Return a string that looks like a real storage key in
+   * your app (e.g. `oidc_nonce_bak`, `stripePublicKeyCache`). Tessera still
+   * deduplicates against real aliases; if a collision occurs the generator is
+   * called again with the same index until a unique alias is produced.
+   */
+  aliasGenerator?: (index: number) => string;
 }
 
 /** Suspicion scoring and platform-aware visibility change configuration. */
@@ -226,7 +235,11 @@ export interface ResolvedConfig {
     maxReads: number;
     onSuspicion: SuspicionAction;
   };
-  honeyKeys: Required<HoneyKeyConfig>;
+  honeyKeys: {
+    count: number;
+    sensitivity: SensitivityLevel;
+    aliasGenerator?: (index: number) => string;
+  };
   halfLife: Required<HalfLifeConfig>;
   suspicion: ResolvedSuspicionConfig;
   workerRateLimits: Required<WorkerRateLimits>;
@@ -318,6 +331,8 @@ export interface HoneyKeyManagerIsh {
   add(backend: string, key: string): void;
   remove(backend: string, key: string): void;
   isHoney(backend: string, key: string): boolean;
+  isDecoyAlias(backend: string, alias: string): boolean;
+  allDecoyAliases(backend: string): string[];
 }
 
 export interface ICookieAdapter {

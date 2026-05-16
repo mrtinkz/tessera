@@ -428,8 +428,12 @@ describe('CookieAdapter', () => {
     adapter.setHoneyManager(mgr);
 
     // Real cookies use developer names (low-c, high-c), honey keys use t_-prefixed names
+    vi.useFakeTimers();
     await adapter.set('low-c', 'lo', { sensitivity: 'low' });
     await adapter.set('high-c', 'hi', { sensitivity: 'high' });
+    vi.runAllTimers();
+    vi.useRealTimers();
+    await new Promise((r) => setTimeout(r, 100));
     expect(mgr.allKeys('cookie').length).toBe(2);
 
     const wiped: string[] = [];
@@ -463,7 +467,11 @@ describe('CookieAdapter', () => {
     const mgr1 = new HoneyKeyManager(config);
     const adapter1 = new CookieAdapter(config, session, new TesseraEmitter());
     adapter1.setHoneyManager(mgr1);
+    vi.useFakeTimers();
     await adapter1.set('persist', 'still-here', { sensitivity: 'low' });
+    vi.advanceTimersByTime(2000);
+    vi.useRealTimers();
+    await new Promise((r) => setTimeout(r, 100));
     const orphanKeys = mgr1.allKeys('cookie');
     expect(orphanKeys.length).toBe(2);
 

@@ -335,11 +335,13 @@ export const Tessera = {
         },
 
         _simulateHoneyHit(backend: 'local' | 'session' | 'cookie'): void {
+          if (!resolved.debug) return;
           if (session.isLocked()) return;
           suspicion.recordHoneyHit(backend);
         },
 
         _honeyStorageKeys(backend: 'local' | 'session' | 'cookie'): string[] {
+          if (!resolved.debug) return [];
           return honeyManager.allKeys(backend);
         },
       };

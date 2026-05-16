@@ -273,6 +273,9 @@ describe('LocalStorageAdapter', () => {
       allKeys: () => [] as string[],
       generateHoneyKeys: () => [] as string[],
       isHoney: (_backend: string, _key: string) => true, // always a honey key
+      isDecoyAlias: () => false,
+      allDecoyAliases: () => [] as string[],
+      assignDecoyAlias: () => {},
       remove: () => {},
       clearBackend: () => {},
     };
@@ -545,8 +548,12 @@ describe('LocalStorageAdapter', () => {
     const adapter = new LocalStorageAdapter(config, session, new TesseraEmitter());
     adapter.setHoneyManager(mgr);
 
+    vi.useFakeTimers();
     await adapter.setItem('low-key', 'lo', { sensitivity: 'low' });
     await adapter.setItem('high-key', 'hi', { sensitivity: 'high' });
+    vi.runAllTimers();
+    vi.useRealTimers();
+    await new Promise((r) => setTimeout(r, 100));
     const honeyKeysBefore = mgr.allKeys('local');
     expect(honeyKeysBefore.length).toBe(2);
 
@@ -584,7 +591,11 @@ describe('LocalStorageAdapter', () => {
     const mgr1 = new HoneyKeyManager(config);
     const adapter1 = new LocalStorageAdapter(config, session, new TesseraEmitter());
     adapter1.setHoneyManager(mgr1);
+    vi.useFakeTimers();
     await adapter1.setItem('persist', 'still-here', { sensitivity: 'low' });
+    vi.advanceTimersByTime(2000);
+    vi.useRealTimers();
+    await new Promise((r) => setTimeout(r, 100));
     const orphanKeys = mgr1.allKeys('local');
     expect(orphanKeys.length).toBe(2);
 
@@ -617,7 +628,11 @@ describe('LocalStorageAdapter', () => {
     const adapter = new LocalStorageAdapter(config, session, new TesseraEmitter());
     adapter.setHoneyManager(mgr);
 
+    vi.useFakeTimers();
     await adapter.setItem('live-key', 'val');
+    vi.runAllTimers();
+    vi.useRealTimers();
+    await new Promise((r) => setTimeout(r, 100));
     const liveHoneyKeys = mgr.allKeys('local');
     expect(liveHoneyKeys.length).toBe(2);
 
@@ -638,5 +653,51 @@ describe('LocalStorageAdapter', () => {
     await adapter.cleanOrphanedHoneyKeys();
     const tKeysAfter = Object.keys(localStorage).filter((k) => k.startsWith('t_'));
     expect(tKeysAfter).toEqual(tKeysBefore);
+  });
+
+  it('getItem returns null and records honey hit when key is a decoy alias', async () => {
+    const config = resolveConfig({ honeyKeys: { count: 2 } } as Parameters<
+      typeof resolveConfig
+    >[0]);
+    const { HoneyKeyManager } = await import('../../src/storage/honey');
+    const mgr = new HoneyKeyManager(config);
+    const events = new TesseraEmitter();
+    const suspicion = new SuspicionEngine(config, events);
+    const adapter = new LocalStorageAdapter(config, session, events, suspicion);
+    adapter.setHoneyManager(mgr);
+    await adapter.setItem('real-key', 'real-value');
+    const aliases = mgr.allDecoyAliases('local');
+    expect(aliases.length).toBeGreaterThan(0);
+    let honeyHits = 0;
+    events.on('honey-triggered', () => {
+      honeyHits++;
+    });
+    const result = await adapter.getItem(aliases[0]!);
+    expect(result).toBeNull();
+    expect(honeyHits).toBe(1);
+    suspicion.destroy();
+  });
+
+  it('exportItem returns null and records honey hit when alias is a decoy', async () => {
+    const config = resolveConfig({ honeyKeys: { count: 2 } } as Parameters<
+      typeof resolveConfig
+    >[0]);
+    const { HoneyKeyManager } = await import('../../src/storage/honey');
+    const mgr = new HoneyKeyManager(config);
+    const events = new TesseraEmitter();
+    const suspicion = new SuspicionEngine(config, events);
+    const adapter = new LocalStorageAdapter(config, session, events, suspicion);
+    adapter.setHoneyManager(mgr);
+    await adapter.setItem('real-key', 'real-value');
+    const aliases = mgr.allDecoyAliases('local');
+    expect(aliases.length).toBeGreaterThan(0);
+    let honeyHits = 0;
+    events.on('honey-triggered', () => {
+      honeyHits++;
+    });
+    const exported = await adapter.exportItem(aliases[0]!);
+    expect(exported).toBeNull();
+    expect(honeyHits).toBe(1);
+    suspicion.destroy();
   });
 });

@@ -19,3 +19,7 @@ tessera-enhancement-plan.md
 
 # Claude Code local config and memory.
 .claude/
+/example/react-demo
+
+# Codebase context graph (local reference only).
+.graph/

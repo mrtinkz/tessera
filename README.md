@@ -339,11 +339,11 @@ All options are optional; defaults are shown.
 | `defaults.ttl`                  | `number` (ms)                               | —          | Default time-to-live for all keys. Keys silently expire and self-delete after this duration.                                                               |
 | `defaults.maxReads`             | `number`                                    | —          | Default read limit. Keys self-delete after this many reads.                                                                                                |
 | `defaults.onSuspicion`          | `'wipe' \| 'lock' \| 'throw'`               | `'wipe'`   | What to do when an HMAC integrity check fails on a stored value.                                                                                           |
-| `honeyKeys.count`               | `number`                                    | `3`        | Number of decoy entries added to localStorage after each write. Set to `0` to disable.                                                                     |
+| `honeyKeys.count`               | `number`                                    | `3`        | Number of decoy entries planted in the same backend after each write. Set to `0` to disable.                                                               |
 | `halfLife.soft`                 | `number` (ms)                               | —          | After this duration, reads require `vault.reconfirm(passcode)` before succeeding.                                                                          |
 | `halfLife.hard`                 | `number` (ms)                               | —          | After this duration, the key is deleted unconditionally.                                                                                                   |
 | `suspicion.platform`            | `'auto' \| 'desktop' \| 'mobile'`           | `'auto'`   | Tunes visibility-change sensitivity for mobile vs desktop usage patterns.                                                                                  |
-| `suspicion.thresholds.lockdown` | `number`                                    | `100`      | Suspicion score that triggers vault lockdown and high-sensitivity key wipe.                                                                                |
+| `suspicion.thresholds.lockdown` | `number`                                    | `100`      | Suspicion score that triggers vault lockdown and a full wipe of all encrypted entries across every backend.                                                |
 
 ---
 
@@ -387,7 +387,7 @@ Sensitivity presets apply a bundled set of defaults. Per-key options always over
 | `'high'`     | 15 min | 10        | 5 min          | Suitable for session tokens, user IDs             |
 | `'critical'` | 5 min  | 3         | 1 min          | Suitable for OTPs, private keys, PII              |
 
-When the vault goes on suspicion lockdown, all `high` and `critical` keys are wiped first.
+When the vault goes on suspicion lockdown, **all** encrypted entries are wiped across every backend — including honey keys — to prevent an attacker from identifying real keys by elimination.
 
 ---
 
@@ -556,7 +556,7 @@ vault.on('honey-triggered', ({ backend, score }) => {
 });
 ```
 
-Honey keys are wiped automatically on `vault.lock()` and `vault.terminate()`.
+On `vault.lock()` and `vault.terminate()`, the in-memory honey registry is cleared. The storage entries themselves persist until the next `Tessera.unlock()`, which runs orphan cleanup in the background and removes any stale decoys.
 
 ---
 
@@ -575,7 +575,7 @@ tessera tracks a running suspicion score and locks down the vault if anomalous b
 When the score reaches the lockdown threshold (default 100), tessera:
 
 1. Locks the vault immediately
-2. Wipes all `high` and `critical` sensitivity keys from every backend
+2. Wipes **all** encrypted entries from every backend — including honey keys — so an attacker cannot identify real keys by seeing which ones survived
 3. Emits `suspicion-lockdown` with the list of wiped keys
 
 ```ts
@@ -790,11 +790,20 @@ tessera targets the [OWASP browser storage threat model](https://owasp.org/www-c
 
 ## Changelog
 
-> **Important:** All users must upgrade to **0.1.3**. Earlier versions contain honey key security vulnerabilities. Upgrade immediately:
+> **Important:** All users must upgrade to **0.1.4**. Earlier versions contain honey key security vulnerabilities. Upgrade immediately:
 >
 > ```bash
-> npm install @mrtinkz/tessera@0.1.3
+> npm install @mrtinkz/tessera@0.1.4
 > ```
+
+### 0.1.4
+
+Bug fix — no breaking API changes, no migration required.
+
+| Area                     | What changed                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Honey key post-wipe race | Deferred honey writes (50–2000 ms randomised delay) could race a lockdown: if the AES-GCM op completed after `wipeAll` cleared the honey registry, the write proceeded and re-added the decoy to storage. Fixed by re-checking `isHoney()` after the crypto await — discards the write if the registry was already cleared. Affects `localStorage`, `sessionStorage`, and cookie adapters. |
+| Enhancement demo         | `_simulateHoneyHit` was silently a no-op because `config.debug` was not set. Demo now passes `debug: true` so the honey-key simulation button works correctly.                                                                                                                                                                                                                             |
 
 ### 0.1.3
 
