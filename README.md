@@ -735,11 +735,21 @@ tessera targets the [OWASP browser storage threat model](https://owasp.org/www-c
 
 ## Changelog
 
-> **Important:** All users must upgrade to **0.1.2**. Earlier versions contain a honey key security vulnerability where lockdown wipes left decoy entries intact, allowing attackers to identify honey keys by elimination. Upgrade immediately:
+> **Important:** All users must upgrade to **0.1.3**. Earlier versions contain honey key security vulnerabilities. Upgrade immediately:
 >
 > ```bash
-> npm install @mrtinkz/tessera@0.1.2
+> npm install @mrtinkz/tessera@0.1.3
 > ```
+
+### 0.1.3
+
+Security hardening — no breaking API changes, no migration required.
+
+| Area                 | What changed                                                                                                                                                                                                                                                                                                  |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `getRawKey` gated    | `vault.local.getRawKey()` now throws unless `config.debug = true`. Without the flag the alias→storage key mapping is opaque, closing the enumeration shortcut an attacker with vault access could use to identify honey keys by elimination.                                                                  |
+| Native storage proxy | `localStorage.getItem` and `sessionStorage.getItem` are proxied at unlock time. Scripts that enumerate storage natively — XSS payloads, extensions, DevTools snippets — now trip honey detection without going through the tessera API. Proxies are restored on `lock()`, `terminate()`, and lockdown.        |
+| `exportItem(alias)`  | New method on `vault.local` and `vault.session`. Returns the decrypted value plus full metadata snapshot (`writeTime`, `readCount`, `ttl`, `sensitivity`, …) without incrementing `readCount` and without surfacing raw storage keys. Sanctioned replacement for any legitimate developer introspection need. |
 
 ### 0.1.2
 
