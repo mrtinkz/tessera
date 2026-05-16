@@ -52,6 +52,7 @@ vault.on('honey-triggered', ({ backend, score }) => {
 ## Contents
 
 - [What is tessera?](#what-is-tessera)
+- [When to use tessera](#when-to-use-tessera)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Framework Integrations](#framework-integrations)
@@ -77,7 +78,29 @@ When you store data in `localStorage` or `sessionStorage`, **any JavaScript on t
 
 tessera solves this by encrypting every value before it touches storage. The only way to read the data back is to supply the same passcode that encrypted it. Without the passcode, all an attacker sees is random-looking base64.
 
-**It is not a magic bullet.** If an attacker can run JavaScript in your page (full XSS), they can steal the passcode as it is typed. tessera dramatically raises the bar — a stolen storage dump is worthless — but it does not replace good content-security-policy, input sanitisation, and other web hygiene. See [Best Practices](#best-practices).
+---
+
+## When to use tessera
+
+**Use tessera when the alternative is doing nothing.**
+
+Most web apps store user data in browser storage with no protection at all — plain text, readable by any script on the page. tessera closes that gap without requiring a backend, a paid auth service, or a complex integration.
+
+It is a good fit for:
+
+- SaaS tools that store tokens, preferences, or user state in `localStorage` with no encryption today
+- Apps where a full IAM integration is more than the threat model actually needs
+- Teams that want real encryption without a server dependency or a monthly bill
+
+**Do not use tessera as a substitute for:**
+
+- **Server-verified identity** — if you need to know a user is who they say they are, that check has to happen on a server
+- **Session revocation across devices** — tessera is local to one browser; it cannot reach other sessions
+- **Compliance-grade access control** (HIPAA, PCI, SOC 2) — those require IAM, audit logs, and server-side enforcement
+
+tessera is not trying to replace any of those. It fills the gap between "no protection" and "full auth stack" — which is exactly where most apps live. A stolen storage dump is worthless. An attacker who tries to enumerate storage trips the honey key system. Key rotation, HMAC integrity, TTL, sensitivity tiers — all the things most teams never get around to building themselves, bundled in 10 KB with zero dependencies.
+
+Libraries that know their scope are more trustworthy than ones that claim to solve everything. tessera knows its scope.
 
 ---
 
@@ -682,6 +705,33 @@ const vault = await Tessera.unlock(passcode);
 // The passcode can be discarded now; the vault holds the derived key
 ```
 
+### Locking strategy
+
+tessera locks when you tell it to. It does not know whether your user is still at the keyboard, has walked away, or switched tabs — your app does.
+
+Wire `vault.lock()` to the moments that make sense for your use case:
+
+```ts
+// Tab hidden — user switched away
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) vault.lock();
+});
+
+// User logs out
+logoutButton.addEventListener('click', () => {
+  vault.terminate(); // clears event listeners and the suspicion engine
+  redirectToLogin();
+});
+
+// React — lock when the component that holds the vault unmounts
+useEffect(() => () => vault.lock(), []);
+
+// Route change
+router.beforeEach(() => vault.lock());
+```
+
+The `idleTimeout` option exists as a safety net — it auto-locks after a period with no vault API calls. But your app's own signals are always more accurate than a timer. Use `idleTimeout` as a fallback, not as your primary locking strategy.
+
 ### SSR / server-side rendering
 
 tessera requires `globalThis.crypto.subtle` (the Web Crypto API). In server-rendered frameworks, only call `Tessera.unlock()` in client-side code:
@@ -726,10 +776,15 @@ tessera targets the [OWASP browser storage threat model](https://owasp.org/www-c
 
 ### What tessera does NOT protect against
 
-- **Full XSS**: If an attacker can run arbitrary JavaScript in your page, they can steal the passcode as the user types it. tessera protects the stored data, not the input channel.
-- **Compromised device**: If the user's OS or browser is compromised, all bets are off.
-- **Cookie attributes**: tessera encrypts cookie values but cannot enforce `HttpOnly` or `Secure` flags on cookies it sets through `document.cookie`. Use server-side cookie management for truly sensitive session tokens.
-- **Cross-origin attacks**: tessera does not add CORS or CSP headers — those are your application's responsibility.
+- **An open vault during XSS.** If an attacker has JavaScript running in your page while the vault is unlocked, they can call vault methods and read decrypted values — the same as any other code on the page can. This is not a tessera limitation; it is how browsers work. Any JavaScript in your page runs with the same permissions you do. What tessera protects is the data at rest: a stolen storage dump, a database backup, a browser extension that reads `localStorage` — all of those get ciphertext and nothing useful. Lock the vault as soon as it is not needed. See [Locking strategy](#locking-strategy).
+
+- **A targeted, informed attacker in your JS context.** The native storage proxy (installed at unlock time to catch scripts that read honey keys without going through the tessera API) can be bypassed by code that calls `Storage.prototype.getItem.call(localStorage, key)` directly. An attacker sophisticated enough to do that already has full execution in your page and can keylog the passcode as it is typed. The proxy catches naive enumeration scripts. It was never meant to stop a targeted attack — that is what IAM and server-side auth are for.
+
+- **Compromised device.** If the user's OS or browser is compromised at the system level, all bets are off.
+
+- **Cookie `HttpOnly` / `Secure` flags.** tessera encrypts cookie values but cannot enforce server-set cookie attributes. Use server-side session cookies for truly sensitive tokens.
+
+- **Cross-origin attacks.** tessera does not add CORS or CSP headers — those are your application's responsibility.
 
 ---
 
