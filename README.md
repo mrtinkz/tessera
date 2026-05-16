@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/TypeScript-5-blue?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript"/>
 </p>
 
-A zero-dependency TypeScript/JavaScript library (~10 KB gzip) that wraps browser storage — `localStorage`, `sessionStorage`, `IndexedDB`, and cookies — with AES-256-GCM encryption. The encryption key is derived from a user passcode and **never leaves the browser**. No server round-trips. No cloud keys. No external dependencies.
+A zero-dependency TypeScript/JavaScript library (~10 KB gzip) that encrypts everything you write to browser storage — and plants decoy tripwires to catch anyone who goes looking.
 
 ```ts
 import { Tessera } from '@mrtinkz/tessera';
@@ -25,6 +25,27 @@ await vault.local.setItem('cart', JSON.stringify(cartData));
 const cart = await vault.local.getItem('cart'); // decrypted, plaintext
 vault.lock(); // zeroes the in-memory key
 ```
+
+**Honey keys** — tessera's defining feature. After every write, the vault plants N decoy entries alongside your real data. They look byte-for-byte identical to real encrypted keys. Any code that touches one — an XSS payload enumerating storage, a malicious extension, an automated scraper — triggers the suspicion engine and can lock the vault and wipe sensitive data before anything useful is read. No other browser storage library does this.
+
+```ts
+const vault = await Tessera.unlock(passcode, { honeyKeys: { count: 5 } });
+
+vault.on('honey-triggered', ({ backend, score }) => {
+  // something just touched a decoy — suspicion score climbing
+});
+```
+
+**Everything else you'd expect, done properly:**
+
+- **AES-256-GCM encryption** on `localStorage`, `sessionStorage`, `IndexedDB`, and cookies — key derived from the user passcode via PBKDF2-SHA-256 (310,000 rounds), never leaves the browser
+- **Suspicion engine** — scores HMAC failures, honey hits, brute-force attempts, and rate anomalies; locks down and wipes on threshold breach
+- **Per-key TTL, max-reads, and half-life** — keys self-destruct by time or access count; soft half-life prompts re-authentication, hard half-life deletes unconditionally
+- **Sensitivity levels** — `low` · `medium` · `high` · `critical`; targeted or full wipes respect the tier
+- **Storage modes** — `direct` (in-place), `claim` (cookie pointer → IDB payload), `split` (XOR-split across two backends)
+- **PIN pad** — canvas-rendered, digit-shuffled on every render to defeat shoulder-surfing and input-event sniffing
+- **Framework integrations** — React, Vue 3, Svelte, Angular
+- **Zero dependencies** — ~10 KB gzip
 
 ---
 
