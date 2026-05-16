@@ -3,6 +3,7 @@ import {
   type EnhancedTesseraConfig,
   type TesseraEventName,
   type TesseraEventHandler,
+  type HoneyKeyManagerIsh,
   TesseraError,
   TesseraErrorCode,
 } from './types';
@@ -51,6 +52,7 @@ export type {
   TesseraEventName,
   TesseraEventPayloads,
   TesseraEventHandler,
+  ExportedItem,
 } from './types';
 export { deriveKey, decrypt, encrypt, encryptWithSalt, decryptFull } from './core/crypto';
 export { renderPinPad } from './ui/pin-pad';
@@ -58,6 +60,28 @@ export { renderPinPad } from './ui/pin-pad';
 const SALT_STORAGE_KEY = 'tessera_vault_salt';
 const VERIFIER_STORAGE_KEY = 'tessera_vault_verifier';
 const VAULT_SENTINEL = '\u0000tessera-vault-verifier\u0000';
+
+function installStorageProxy(
+  storage: Storage,
+  backend: string,
+  honeyManager: HoneyKeyManagerIsh,
+  suspicion: SuspicionEngine,
+): () => void {
+  const original = Storage.prototype.getItem;
+  Object.defineProperty(storage, 'getItem', {
+    configurable: true,
+    value(key: string): string | null {
+      const value = original.call(storage, key);
+      if (value !== null && honeyManager.isHoney(backend, key)) {
+        suspicion.recordHoneyHit(backend);
+      }
+      return value;
+    },
+  });
+  return (): void => {
+    Object.defineProperty(storage, 'getItem', { configurable: true, value: original });
+  };
+}
 
 /**
  * The main entry point for tessera.
@@ -218,6 +242,28 @@ export const Tessera = {
       const cookieAdapter = new CookieAdapter(resolved, session, events, suspicion);
       const idbAdapter = new IndexedDbAdapter(resolved, session, events, suspicion);
 
+      localAdapter.setHoneyManager(honeyManager);
+      sessionAdapter.setHoneyManager(honeyManager);
+      cookieAdapter.setHoneyManager(honeyManager);
+      sessionAdapter.setIdbAdapter(idbAdapter);
+      cookieAdapter.setIdbAdapter(idbAdapter);
+
+      const proxyCleanups: Array<() => void> = [];
+      /* v8 ignore next 6 */
+      try {
+        proxyCleanups.push(
+          installStorageProxy(localStorage, 'local', honeyManager, suspicion),
+          installStorageProxy(sessionStorage, 'session', honeyManager, suspicion),
+        );
+      } catch {
+        // Non-browser or restricted environment — proxy installation is best-effort
+      }
+
+      const cleanupProxies = (): void => {
+        for (const fn of proxyCleanups) fn();
+        proxyCleanups.length = 0;
+      };
+
       suspicion.setOnLockdown(async () => {
         // Nuke all t_ entries across every backend while the crypto key is still
         // accessible, then lock. This prevents an attacker from identifying honey
@@ -228,15 +274,10 @@ export const Tessera = {
         await cookieAdapter.wipeAll(wiped);
         await idbAdapter.wipeAll(wiped);
         session.lock();
+        cleanupProxies();
         events.emit('vault-locked', { reason: 'suspicion-lockdown' });
         return wiped;
       });
-
-      localAdapter.setHoneyManager(honeyManager);
-      sessionAdapter.setHoneyManager(honeyManager);
-      cookieAdapter.setHoneyManager(honeyManager);
-      sessionAdapter.setIdbAdapter(idbAdapter);
-      cookieAdapter.setIdbAdapter(idbAdapter);
 
       const vaultSalt = salt;
 
@@ -258,6 +299,7 @@ export const Tessera = {
           session.lock();
           suspicion.destroy();
           honeyManager.clearAll();
+          cleanupProxies();
           events.emit('vault-locked', { reason: 'user' });
         },
 
@@ -289,6 +331,7 @@ export const Tessera = {
           events.clear();
           suspicion.destroy();
           honeyManager.clearAll();
+          cleanupProxies();
         },
 
         _simulateHoneyHit(backend: 'local' | 'session' | 'cookie'): void {

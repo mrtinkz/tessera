@@ -106,6 +106,7 @@ export interface EnhancedTesseraConfig extends TesseraConfig {
   halfLife?: HalfLifeConfig;
   suspicion?: SuspicionConfig;
   workerRateLimits?: WorkerRateLimits;
+  debug?: boolean;
 }
 
 export const DEFAULT_CONFIG: Required<TesseraConfig> = {
@@ -229,10 +230,24 @@ export interface ResolvedConfig {
   halfLife: Required<HalfLifeConfig>;
   suspicion: ResolvedSuspicionConfig;
   workerRateLimits: Required<WorkerRateLimits>;
+  debug: boolean;
 }
 
 /** Per-value metadata stored encrypted alongside the value. */
 export interface ValueMetadata {
+  writeTime: number;
+  readCount: number;
+  sensitivity?: SensitivityLevel;
+  ttl?: number;
+  maxReads?: number;
+  onSuspicion?: SuspicionAction;
+  halfLifeSoft?: number;
+  halfLifeHard?: number;
+}
+
+/** Inspectable snapshot of a stored item returned by exportItem. */
+export interface ExportedItem {
+  value: string;
   writeTime: number;
   readCount: number;
   sensitivity?: SensitivityLevel;
@@ -295,6 +310,7 @@ export interface IStorageAdapter {
   keys(): Promise<string[]>;
 
   getRawKey?(developerKey: string): Promise<string>;
+  exportItem?(alias: string): Promise<ExportedItem | null>;
   setHoneyManager?(manager: HoneyKeyManagerIsh): void;
 }
 

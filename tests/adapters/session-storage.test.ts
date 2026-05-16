@@ -51,7 +51,11 @@ describe('SessionStorageAdapter', () => {
   });
 
   it('should encrypt all keys with name rotation', async () => {
-    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    const adapter = new SessionStorageAdapter(
+      resolveConfig({ debug: true }),
+      session,
+      new TesseraEmitter(),
+    );
     await adapter.setItem('plain', 'open');
     await adapter.setItem('enc', 'secret');
 
@@ -174,7 +178,7 @@ describe('SessionStorageAdapter', () => {
   // meta HMAC failure (corrupt meta part before the dot)
   it('should emit hmac-failure and remove item when meta decryption fails', async () => {
     const events = new TesseraEmitter();
-    const adapter = new SessionStorageAdapter(resolveConfig(), session, events);
+    const adapter = new SessionStorageAdapter(resolveConfig({ debug: true }), session, events);
     const handler = vi.fn();
     events.on('hmac-failure', handler);
 
@@ -191,7 +195,11 @@ describe('SessionStorageAdapter', () => {
 
   // applyOnSuspicion – lock
   it('should lock session when onSuspicion is "lock" and value HMAC fails', async () => {
-    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    const adapter = new SessionStorageAdapter(
+      resolveConfig({ debug: true }),
+      session,
+      new TesseraEmitter(),
+    );
     await adapter.setItem('sus-lock', 'secure', { onSuspicion: 'lock' });
     const rawKey = await adapter.getRawKey!('sus-lock');
     const stored = sessionStorage.getItem(rawKey)!;
@@ -203,7 +211,11 @@ describe('SessionStorageAdapter', () => {
 
   // applyOnSuspicion – throw (key intact)
   it('should leave key intact when onSuspicion is "throw" and value HMAC fails', async () => {
-    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    const adapter = new SessionStorageAdapter(
+      resolveConfig({ debug: true }),
+      session,
+      new TesseraEmitter(),
+    );
     await adapter.setItem('sus-throw', 'secure', { onSuspicion: 'throw' });
     const rawKey = await adapter.getRawKey!('sus-throw');
     const stored = sessionStorage.getItem(rawKey)!;
@@ -215,7 +227,11 @@ describe('SessionStorageAdapter', () => {
 
   // applyOnSuspicion – wipe (default)
   it('should wipe key when onSuspicion is "wipe" and value HMAC fails', async () => {
-    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    const adapter = new SessionStorageAdapter(
+      resolveConfig({ debug: true }),
+      session,
+      new TesseraEmitter(),
+    );
     await adapter.setItem('sus-wipe', 'secure', { onSuspicion: 'wipe' });
     const rawKey = await adapter.getRawKey!('sus-wipe');
     const stored = sessionStorage.getItem(rawKey)!;
@@ -482,15 +498,140 @@ describe('SessionStorageAdapter', () => {
 
   // getRawKey when locked returns developer key unchanged (covers line 200 true branch)
   it('should return the developer key unchanged from getRawKey when vault is locked', async () => {
-    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    const adapter = new SessionStorageAdapter(
+      resolveConfig({ debug: true }),
+      session,
+      new TesseraEmitter(),
+    );
     session.lock();
     const result = await adapter.getRawKey!('my-developer-key');
     expect(result).toBe('my-developer-key');
   });
 
+  it('getRawKey throws when debug mode is not enabled', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await expect(adapter.getRawKey!('any-key')).rejects.toThrow('debug mode');
+  });
+
+  it('exportItem returns value and metadata without incrementing readCount', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('ss-exp-key', 'ss-exp-value');
+    const exported1 = await adapter.exportItem!('ss-exp-key');
+    expect(exported1).not.toBeNull();
+    expect(exported1!.value).toBe('ss-exp-value');
+    expect(exported1!.readCount).toBe(0);
+    const exported2 = await adapter.exportItem!('ss-exp-key');
+    expect(exported2!.readCount).toBe(0);
+  });
+
+  it('exportItem returns null for unknown key', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    const result = await adapter.exportItem!('nonexistent-ss-key');
+    expect(result).toBeNull();
+  });
+
+  it('exportItem returns null when halfLifeSoft has elapsed', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('ss-exp-soft', 'v', { halfLife: { soft: 1 } });
+    await new Promise((r) => setTimeout(r, 10));
+    const result = await adapter.exportItem!('ss-exp-soft');
+    expect(result).toBeNull();
+  });
+
+  it('exportItem returns null when maxReads is exhausted', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('ss-exp-mr', 'v', { maxReads: 1 });
+    await adapter.getItem('ss-exp-mr');
+    const result = await adapter.exportItem!('ss-exp-mr');
+    expect(result).toBeNull();
+  });
+
+  it('exportItem returns null when halfLife.hard has elapsed', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('ss-exp-hard', 'v', { halfLife: { hard: 1 } });
+    await new Promise((r) => setTimeout(r, 10));
+    const result = await adapter.exportItem!('ss-exp-hard');
+    expect(result).toBeNull();
+  });
+
+  it('exportItem returns null when value HMAC is corrupt', async () => {
+    const adapter = new SessionStorageAdapter(
+      resolveConfig({ debug: true }),
+      session,
+      new TesseraEmitter(),
+    );
+    await adapter.setItem('ss-exp-corrupt', 'v');
+    const rawKey = await adapter.getRawKey!('ss-exp-corrupt');
+    const stored = sessionStorage.getItem(rawKey)!;
+    const dotIdx = stored.indexOf('.');
+    sessionStorage.setItem(rawKey, stored.slice(0, dotIdx + 1) + 'INVALIDBASE64GARBAGE==');
+    const result = await adapter.exportItem!('ss-exp-corrupt');
+    expect(result).toBeNull();
+  });
+
+  it('exportItem returns null when meta HMAC is corrupt', async () => {
+    const adapter = new SessionStorageAdapter(
+      resolveConfig({ debug: true }),
+      session,
+      new TesseraEmitter(),
+    );
+    await adapter.setItem('ss-exp-meta-corrupt', 'v');
+    const rawKey = await adapter.getRawKey!('ss-exp-meta-corrupt');
+    const stored = sessionStorage.getItem(rawKey)!;
+    const dotIdx = stored.indexOf('.');
+    sessionStorage.setItem(rawKey, 'INVALIDBASE64GARBAGE==' + stored.slice(dotIdx));
+    const result = await adapter.exportItem!('ss-exp-meta-corrupt');
+    expect(result).toBeNull();
+  });
+
+  it('exportItem returns null when TTL has expired', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('ss-exp-ttl', 'v', { ttl: 1 });
+    await new Promise((r) => setTimeout(r, 10));
+    const result = await adapter.exportItem!('ss-exp-ttl');
+    expect(result).toBeNull();
+  });
+
+  it('exportItem normalises NaN readCount in metadata', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    const cryptoKey = session.getKey();
+    const meta = JSON.stringify({
+      writeTime: Date.now(),
+      readCount: Number.NaN,
+      sensitivity: 'low',
+      onSuspicion: 'wipe',
+    });
+    const encMeta = await encryptWithSalt(cryptoKey, meta);
+    const encVal = await encryptWithSalt(cryptoKey, 'nan-exp-val');
+    const rawKey = await session.rotateKeyName('ss-exp-nan-count');
+    sessionStorage.setItem(rawKey, `${encMeta}.${encVal}`);
+    const result = await adapter.exportItem!('ss-exp-nan-count');
+    expect(result).not.toBeNull();
+    expect(result!.readCount).toBe(0);
+  });
+
+  it('exportItem omits optional fields absent from metadata', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    const cryptoKey = session.getKey();
+    const meta = JSON.stringify({ writeTime: Date.now(), readCount: 0 });
+    const encMeta = await encryptWithSalt(cryptoKey, meta);
+    const encVal = await encryptWithSalt(cryptoKey, 'ss-bare-val');
+    const rawKey = await session.rotateKeyName('ss-exp-bare');
+    sessionStorage.setItem(rawKey, `${encMeta}.${encVal}`);
+    const result = await adapter.exportItem!('ss-exp-bare');
+    expect(result).not.toBeNull();
+    expect(result!.sensitivity).toBeUndefined();
+    expect(result!.onSuspicion).toBeUndefined();
+    expect(result!.halfLifeSoft).toBeUndefined();
+  });
+
   // handleSplitWrite false branch of `if (this.idb)` (covers lines 200-219 false branch)
   it('should write split: prefix to sessionStorage without IDB when no idb adapter set', async () => {
-    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    const adapter = new SessionStorageAdapter(
+      resolveConfig({ debug: true }),
+      session,
+      new TesseraEmitter(),
+    );
     // No idb adapter → handleSplitWrite skips the `if (this.idb)` block
     await adapter.setItem('split-no-idb-2', 'val', { mode: 'split' });
     const rawKey = await adapter.getRawKey!('split-no-idb-2');
@@ -501,7 +642,7 @@ describe('SessionStorageAdapter', () => {
 
   // wipeHighSensitivity: skips split: and ref: prefixed entries (covers lines 148-163)
   it('should skip split: and ref: entries during wipeHighSensitivity', async () => {
-    const config = resolveConfig();
+    const config = resolveConfig({ debug: true });
     const events = new TesseraEmitter();
     const idbAdapter = new IndexedDbAdapter(config, session, events);
     const adapter = new SessionStorageAdapter(config, session, events);

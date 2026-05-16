@@ -51,7 +51,7 @@ describe('LocalStorageAdapter', () => {
   });
 
   it('should encrypt all keys with name rotation', async () => {
-    const config = resolveConfig();
+    const config = resolveConfig({ debug: true });
     const events = new TesseraEmitter();
     const adapter = new LocalStorageAdapter(config, session, events);
     await adapter.setItem('plain', 'visible');
@@ -197,7 +197,7 @@ describe('LocalStorageAdapter', () => {
   // meta HMAC failure (corrupt meta part before the dot)
   it('should emit hmac-failure and remove item when meta decryption fails', async () => {
     const events = new TesseraEmitter();
-    const adapter = new LocalStorageAdapter(resolveConfig(), session, events);
+    const adapter = new LocalStorageAdapter(resolveConfig({ debug: true }), session, events);
     const handler = vi.fn();
     events.on('hmac-failure', handler);
 
@@ -216,7 +216,7 @@ describe('LocalStorageAdapter', () => {
   // applyOnSuspicion with 'lock' action
   it('should lock the session when onSuspicion is "lock" and value HMAC fails', async () => {
     const events = new TesseraEmitter();
-    const adapter = new LocalStorageAdapter(resolveConfig(), session, events);
+    const adapter = new LocalStorageAdapter(resolveConfig({ debug: true }), session, events);
     // Write a valid item with onSuspicion=lock
     await adapter.setItem('sus-lock', 'secure', { onSuspicion: 'lock' });
 
@@ -234,7 +234,7 @@ describe('LocalStorageAdapter', () => {
   // applyOnSuspicion with 'throw' action (key stays, returns null)
   it('should leave key intact when onSuspicion is "throw" and value HMAC fails', async () => {
     const events = new TesseraEmitter();
-    const adapter = new LocalStorageAdapter(resolveConfig(), session, events);
+    const adapter = new LocalStorageAdapter(resolveConfig({ debug: true }), session, events);
     await adapter.setItem('sus-throw', 'secure', { onSuspicion: 'throw' });
 
     const rawKey = await adapter.getRawKey!('sus-throw');
@@ -251,7 +251,7 @@ describe('LocalStorageAdapter', () => {
   // applyOnSuspicion with default 'wipe' action
   it('should wipe the key when onSuspicion is "wipe" (default) and value HMAC fails', async () => {
     const events = new TesseraEmitter();
-    const adapter = new LocalStorageAdapter(resolveConfig(), session, events);
+    const adapter = new LocalStorageAdapter(resolveConfig({ debug: true }), session, events);
     await adapter.setItem('sus-wipe', 'secure', { onSuspicion: 'wipe' });
 
     const rawKey = await adapter.getRawKey!('sus-wipe');
@@ -387,10 +387,131 @@ describe('LocalStorageAdapter', () => {
 
   // getRawKey returns the developer key unchanged when session is locked
   it('should return the raw developer key unchanged when session is locked', async () => {
-    const adapter = new LocalStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    const adapter = new LocalStorageAdapter(
+      resolveConfig({ debug: true }),
+      session,
+      new TesseraEmitter(),
+    );
     session.lock();
     const result = await adapter.getRawKey!('my-key');
     expect(result).toBe('my-key');
+  });
+
+  it('getRawKey throws when debug mode is not enabled', async () => {
+    const adapter = new LocalStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await expect(adapter.getRawKey!('any-key')).rejects.toThrow('debug mode');
+  });
+
+  it('exportItem returns value and metadata without incrementing readCount', async () => {
+    const adapter = new LocalStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('exp-key', 'exp-value');
+    const exported1 = await adapter.exportItem!('exp-key');
+    expect(exported1).not.toBeNull();
+    expect(exported1!.value).toBe('exp-value');
+    expect(exported1!.readCount).toBe(0);
+    const exported2 = await adapter.exportItem!('exp-key');
+    expect(exported2!.readCount).toBe(0);
+  });
+
+  it('exportItem returns null for unknown key', async () => {
+    const adapter = new LocalStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    const result = await adapter.exportItem!('nonexistent-key');
+    expect(result).toBeNull();
+  });
+
+  it('exportItem returns null when halfLifeSoft has elapsed', async () => {
+    const adapter = new LocalStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('exp-soft', 'v', { halfLife: { soft: 1 } });
+    await new Promise((r) => setTimeout(r, 10));
+    const result = await adapter.exportItem!('exp-soft');
+    expect(result).toBeNull();
+  });
+
+  it('exportItem returns null when maxReads is exhausted', async () => {
+    const adapter = new LocalStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('exp-mr', 'v', { maxReads: 1 });
+    await adapter.getItem('exp-mr');
+    const result = await adapter.exportItem!('exp-mr');
+    expect(result).toBeNull();
+  });
+
+  it('exportItem returns null when halfLife.hard has elapsed', async () => {
+    const adapter = new LocalStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('exp-hard', 'v', { halfLife: { hard: 1 } });
+    await new Promise((r) => setTimeout(r, 10));
+    const result = await adapter.exportItem!('exp-hard');
+    expect(result).toBeNull();
+  });
+
+  it('exportItem returns null when value HMAC is corrupt', async () => {
+    const adapter = new LocalStorageAdapter(
+      resolveConfig({ debug: true }),
+      session,
+      new TesseraEmitter(),
+    );
+    await adapter.setItem('exp-corrupt', 'v');
+    const rawKey = await adapter.getRawKey!('exp-corrupt');
+    const stored = localStorage.getItem(rawKey)!;
+    const dotIdx = stored.indexOf('.');
+    localStorage.setItem(rawKey, stored.slice(0, dotIdx + 1) + 'INVALIDBASE64GARBAGE==');
+    const result = await adapter.exportItem!('exp-corrupt');
+    expect(result).toBeNull();
+  });
+
+  it('exportItem returns null when meta HMAC is corrupt', async () => {
+    const adapter = new LocalStorageAdapter(
+      resolveConfig({ debug: true }),
+      session,
+      new TesseraEmitter(),
+    );
+    await adapter.setItem('exp-meta-corrupt', 'v');
+    const rawKey = await adapter.getRawKey!('exp-meta-corrupt');
+    const stored = localStorage.getItem(rawKey)!;
+    const dotIdx = stored.indexOf('.');
+    localStorage.setItem(rawKey, 'INVALIDBASE64GARBAGE==' + stored.slice(dotIdx));
+    const result = await adapter.exportItem!('exp-meta-corrupt');
+    expect(result).toBeNull();
+  });
+
+  it('exportItem returns null when TTL has expired', async () => {
+    const adapter = new LocalStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('exp-ttl', 'v', { ttl: 1 });
+    await new Promise((r) => setTimeout(r, 10));
+    const result = await adapter.exportItem!('exp-ttl');
+    expect(result).toBeNull();
+  });
+
+  it('exportItem normalises NaN readCount in metadata', async () => {
+    const adapter = new LocalStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    const cryptoKey = session.getKey();
+    const meta = JSON.stringify({
+      writeTime: Date.now(),
+      readCount: Number.NaN,
+      sensitivity: 'low',
+      onSuspicion: 'wipe',
+    });
+    const encMeta = await encryptWithSalt(cryptoKey, meta);
+    const encVal = await encryptWithSalt(cryptoKey, 'nan-exp-val');
+    const rawKey = await session.rotateKeyName('exp-nan-count');
+    localStorage.setItem(rawKey, `${encMeta}.${encVal}`);
+    const result = await adapter.exportItem!('exp-nan-count');
+    expect(result).not.toBeNull();
+    expect(result!.readCount).toBe(0);
+  });
+
+  it('exportItem omits optional fields absent from metadata', async () => {
+    const adapter = new LocalStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    const cryptoKey = session.getKey();
+    const meta = JSON.stringify({ writeTime: Date.now(), readCount: 0 });
+    const encMeta = await encryptWithSalt(cryptoKey, meta);
+    const encVal = await encryptWithSalt(cryptoKey, 'bare-val');
+    const rawKey = await session.rotateKeyName('exp-bare');
+    localStorage.setItem(rawKey, `${encMeta}.${encVal}`);
+    const result = await adapter.exportItem!('exp-bare');
+    expect(result).not.toBeNull();
+    expect(result!.sensitivity).toBeUndefined();
+    expect(result!.onSuspicion).toBeUndefined();
+    expect(result!.halfLifeSoft).toBeUndefined();
   });
 
   // buildMeta false branches: low sensitivity has no ttl/maxReads/halfLifeHard defaults

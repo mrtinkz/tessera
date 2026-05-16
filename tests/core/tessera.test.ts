@@ -29,7 +29,7 @@ describe('Tessera.unlock', () => {
   });
 
   it('should store and retrieve encrypted data via localStorage adapter', async () => {
-    const vault = await Tessera.unlock('246813');
+    const vault = await Tessera.unlock('246813', { debug: true });
     await vault.local.setItem('key', 'value');
     const result = await vault.local.getItem('key');
     expect(result).toBe('value');
@@ -150,7 +150,7 @@ describe('Tessera.unlock', () => {
   });
 
   it('stored localStorage key has t_ prefix with 32-char hex suffix (rotateKeyName format)', async () => {
-    const vault = await Tessera.unlock('246813');
+    const vault = await Tessera.unlock('246813', { debug: true });
     await vault.local.setItem('testkey', 'testvalue');
 
     // The raw key used in localStorage should be in `t_<32hex>` format (34 chars total).
@@ -249,6 +249,7 @@ describe('Tessera.unlock', () => {
   it('lockdown: wipes high-sensitivity keys from storage before locking', async () => {
     const vault = await Tessera.unlock('246813', {
       suspicion: { thresholds: { lockdown: 1 } },
+      debug: true,
     } as Parameters<typeof Tessera.unlock>[1]);
 
     await vault.local.setItem('secret', 'sensitive-data', { sensitivity: 'high' });
@@ -265,6 +266,7 @@ describe('Tessera.unlock', () => {
   it('lockdown: wipes critical-sensitivity keys from storage before locking', async () => {
     const vault = await Tessera.unlock('246813', {
       suspicion: { thresholds: { lockdown: 1 } },
+      debug: true,
     } as Parameters<typeof Tessera.unlock>[1]);
 
     await vault.local.setItem('crit', 'top-secret', { sensitivity: 'critical' });
@@ -281,6 +283,7 @@ describe('Tessera.unlock', () => {
   it('lockdown: also wipes low-sensitivity keys (wipeAll nukes everything)', async () => {
     const vault = await Tessera.unlock('246813', {
       suspicion: { thresholds: { lockdown: 1 } },
+      debug: true,
     } as Parameters<typeof Tessera.unlock>[1]);
 
     await vault.local.setItem('pub', 'public-data', { sensitivity: 'low' });
@@ -451,5 +454,59 @@ describe('Tessera.unlock', () => {
     expect(await vault2.local.getItem('real')).toBe('value');
 
     vault2.lock();
+  });
+
+  it('direct localStorage.getItem on a honey key records a honey hit', async () => {
+    const vault = await Tessera.unlock('246813', { honeyKeys: { count: 3 } });
+    await vault.local.setItem('mykey', 'myvalue');
+    const honeyKeys = vault._honeyStorageKeys('local');
+    expect(honeyKeys.length).toBeGreaterThan(0);
+    let honeyHit = false;
+    vault.on('honey-triggered', () => {
+      honeyHit = true;
+    });
+    localStorage.getItem(honeyKeys[0]);
+    expect(honeyHit).toBe(true);
+    vault.lock();
+  });
+
+  it('proxy is removed on vault.lock()', async () => {
+    const vault = await Tessera.unlock('246813', { honeyKeys: { count: 3 } });
+    await vault.local.setItem('mykey', 'myvalue');
+    const honeyKeys = vault._honeyStorageKeys('local');
+    expect(honeyKeys.length).toBeGreaterThan(0);
+    vault.lock();
+
+    let honeyHit = false;
+    vault.on('honey-triggered', () => {
+      honeyHit = true;
+    });
+    localStorage.getItem(honeyKeys[0]);
+    expect(honeyHit).toBe(false);
+  });
+
+  it('exportItem returns value and metadata', async () => {
+    const vault = await Tessera.unlock('246813');
+    await vault.local.setItem('exp-key', 'exp-value');
+    const exported = await vault.local.exportItem!('exp-key');
+    expect(exported).not.toBeNull();
+    expect(exported!.value).toBe('exp-value');
+    expect(typeof exported!.writeTime).toBe('number');
+    vault.lock();
+  });
+
+  it('proxy cleanup on terminate', async () => {
+    const vault = await Tessera.unlock('246813', { honeyKeys: { count: 3 } });
+    await vault.local.setItem('mykey', 'myvalue');
+    const honeyKeys = vault._honeyStorageKeys('local');
+    expect(honeyKeys.length).toBeGreaterThan(0);
+    vault.terminate();
+
+    let honeyHit = false;
+    vault.on('honey-triggered', () => {
+      honeyHit = true;
+    });
+    localStorage.getItem(honeyKeys[0]);
+    expect(honeyHit).toBe(false);
   });
 });

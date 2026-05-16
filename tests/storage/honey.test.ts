@@ -165,7 +165,7 @@ describe('HoneyKeyManager — storage format matches real entries', () => {
     for (let i = 0; i < 5; i++) {
       localStorage.clear();
       resetLockout();
-      const vault = await Tessera.unlock('246813', { honeyKeys: { count: 3 } });
+      const vault = await Tessera.unlock('246813', { honeyKeys: { count: 3 }, debug: true });
       await vault.local.setItem('k', 'v');
 
       const rawKey = await vault.local.getRawKey!('k');

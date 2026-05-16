@@ -49,6 +49,7 @@ export function resolveConfig(config?: EnhancedTesseraConfig): ResolvedConfig {
       maxReadsPerSession: DEFAULT_ENHANCED_CONFIG.workerRateLimits.maxReadsPerSession,
       maxMessagesPerSecond: DEFAULT_ENHANCED_CONFIG.workerRateLimits.maxMessagesPerSecond,
     },
+    debug: false,
   };
 
   if (config) {
@@ -104,6 +105,7 @@ export function resolveConfig(config?: EnhancedTesseraConfig): ResolvedConfig {
       enhanced.workerRateLimits.maxReadsPerSession = wrl.maxReadsPerSession;
     if (wrl?.maxMessagesPerSecond !== undefined)
       enhanced.workerRateLimits.maxMessagesPerSecond = wrl.maxMessagesPerSecond;
+    if (config.debug !== undefined) enhanced.debug = config.debug;
   }
 
   applyFloors(enhanced);

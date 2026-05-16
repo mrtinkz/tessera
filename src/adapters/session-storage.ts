@@ -2,6 +2,7 @@ import {
   type IStorageAdapter,
   type StorageItemOptions,
   type ValueMetadata,
+  type ExportedItem,
   type ResolvedConfig,
   type SensitivityLevel,
   type SuspicionAction,
@@ -252,8 +253,111 @@ export class SessionStorageAdapter implements IStorageAdapter {
   }
 
   async getRawKey(developerKey: string): Promise<string> {
+    if (!this.config.debug) {
+      throw new Error('getRawKey is only available in debug mode. Set config.debug = true.');
+    }
     if (this.session.isLocked()) return developerKey;
     return this.session.rotateKeyName(developerKey);
+  }
+
+  async exportItem(alias: string): Promise<ExportedItem | null> {
+    const cryptoKey = this.session.getKeySafe();
+    if (cryptoKey === null) return null;
+
+    const storageKey = await this.session.rotateKeyNameSafe(alias);
+    if (storageKey === null) return null;
+
+    if (this.honeyManager?.isHoney('session', storageKey)) return null;
+
+    const raw = this.rawGetItem(storageKey);
+    if (raw === null) return null;
+
+    if (raw.startsWith(SPLIT_PREFIX) || raw.startsWith(CLAIM_PREFIX)) return null;
+
+    const dotIdx = raw.indexOf('.');
+    if (dotIdx === -1) return null;
+
+    const metaB64 = raw.slice(0, dotIdx);
+    const valueB64 = raw.slice(dotIdx + 1);
+
+    const metaResult = await decryptFull(cryptoKey, metaB64);
+    if (!metaResult.ok) {
+      this.suspicion?.recordHmacFailure();
+      this.events?.emit('hmac-failure', { keyAlias: alias, backend: 'session' });
+      await this.removeItem(alias);
+      return null;
+    }
+
+    const metadata: ValueMetadata = JSON.parse(metaResult.value);
+    if (typeof metadata.readCount !== 'number' || !Number.isFinite(metadata.readCount)) {
+      metadata.readCount = 0;
+    }
+
+    if (metadata.ttl !== undefined && Date.now() - metadata.writeTime > metadata.ttl) {
+      this.events?.emit('key-expired', {
+        keyAlias: alias,
+        backend: 'session',
+        expiredAt: metadata.writeTime + metadata.ttl,
+      });
+      await this.removeItem(alias);
+      return null;
+    }
+
+    if (metadata.maxReads !== undefined && metadata.readCount >= metadata.maxReads) {
+      this.events?.emit('max-reads-reached', {
+        keyAlias: alias,
+        backend: 'session',
+        reads: metadata.readCount,
+      });
+      await this.removeItem(alias);
+      return null;
+    }
+
+    if (
+      metadata.halfLifeHard !== undefined &&
+      Date.now() - metadata.writeTime > metadata.halfLifeHard
+    ) {
+      this.events?.emit('key-expired', {
+        keyAlias: alias,
+        backend: 'session',
+        expiredAt: metadata.writeTime + metadata.halfLifeHard,
+      });
+      await this.removeItem(alias);
+      return null;
+    }
+
+    if (
+      metadata.halfLifeSoft !== undefined &&
+      Date.now() - metadata.writeTime > metadata.halfLifeSoft
+    ) {
+      this.events?.emit('reconfirmation-required', {
+        keyAlias: alias,
+        softThresholdMs: metadata.halfLifeSoft,
+        elapsedMs: Date.now() - metadata.writeTime,
+      });
+      return null;
+    }
+
+    const valueResult = await decryptFull(cryptoKey, valueB64);
+    if (!valueResult.ok) {
+      this.suspicion?.recordHmacFailure();
+      this.events?.emit('hmac-failure', { keyAlias: alias, backend: 'session' });
+      await this.applyOnSuspicion(metadata.onSuspicion, alias, 'session');
+      return null;
+    }
+
+    const exported: ExportedItem = {
+      value: valueResult.value,
+      writeTime: metadata.writeTime,
+      readCount: metadata.readCount,
+    };
+    if (metadata.sensitivity !== undefined) exported.sensitivity = metadata.sensitivity;
+    if (metadata.ttl !== undefined) exported.ttl = metadata.ttl;
+    if (metadata.maxReads !== undefined) exported.maxReads = metadata.maxReads;
+    if (metadata.onSuspicion !== undefined) exported.onSuspicion = metadata.onSuspicion;
+    if (metadata.halfLifeSoft !== undefined) exported.halfLifeSoft = metadata.halfLifeSoft;
+    if (metadata.halfLifeHard !== undefined) exported.halfLifeHard = metadata.halfLifeHard;
+    return exported;
   }
 
   private async handleSplitWrite(
