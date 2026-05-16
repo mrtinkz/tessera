@@ -9,6 +9,7 @@ import {
   decryptFull,
   zeroPasscode,
   rotateKeyName,
+  generateHoneyCiphertext,
 } from '../../src/core/crypto';
 
 async function makeKey(passcode = '246813') {
@@ -348,5 +349,53 @@ describe('crypto.rotateKeyName (HMAC-based)', () => {
     const a = await rotateKeyName(hmacKeyA, 'my-key');
     const b = await rotateKeyName(hmacKeyB, 'my-key');
     expect(a).not.toBe(b);
+  });
+});
+
+describe('crypto.generateHoneyCiphertext', () => {
+  it('produces exactly one dot — two-blob encryptedMeta.encryptedValue format', async () => {
+    const key = await makeKey();
+    const ct = await generateHoneyCiphertext(key);
+    const dots = (ct.match(/\./g) ?? []).length;
+    expect(dots).toBe(1);
+  });
+
+  it('both blobs are non-empty base64 strings', async () => {
+    const key = await makeKey();
+    const ct = await generateHoneyCiphertext(key);
+    const [meta, value] = ct.split('.');
+    expect(meta.length).toBeGreaterThan(0);
+    expect(value.length).toBeGreaterThan(0);
+    // valid base64 (no dot inside a blob)
+    expect(() => atob(meta)).not.toThrow();
+    expect(() => atob(value)).not.toThrow();
+  });
+
+  it('produces different ciphertexts on each call (random)', async () => {
+    const key = await makeKey();
+    const a = await generateHoneyCiphertext(key);
+    const b = await generateHoneyCiphertext(key);
+    expect(a).not.toBe(b);
+  });
+
+  it('value blob lengths vary across multiple calls', async () => {
+    const key = await makeKey();
+    const lengths = new Set<number>();
+    for (let i = 0; i < 20; i++) {
+      const ct = await generateHoneyCiphertext(key);
+      lengths.add(ct.split('.')[1].length);
+    }
+    // With 20 calls over a 128-char range we expect at least 2 distinct lengths
+    expect(lengths.size).toBeGreaterThan(1);
+  });
+
+  it('meta blob lengths vary across multiple calls', async () => {
+    const key = await makeKey();
+    const lengths = new Set<number>();
+    for (let i = 0; i < 20; i++) {
+      const ct = await generateHoneyCiphertext(key);
+      lengths.add(ct.split('.')[0].length);
+    }
+    expect(lengths.size).toBeGreaterThan(1);
   });
 });

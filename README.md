@@ -714,6 +714,21 @@ tessera targets the [OWASP browser storage threat model](https://owasp.org/www-c
 
 ## Changelog
 
+> **Important:** All users must upgrade to **0.1.2**. Earlier versions contain a honey key security vulnerability where lockdown wipes left decoy entries intact, allowing attackers to identify honey keys by elimination. Upgrade immediately:
+>
+> ```bash
+> npm install @mrtinkz/tessera@0.1.2
+> ```
+
+### 0.1.2
+
+Security patch — no breaking API changes, no migration required.
+
+| Area                      | What changed                                                                                                                                                                                                                                             |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Lockdown wipes all decoys | `wipeAll()` now nukes every `t_`-prefixed entry across all backends (localStorage, sessionStorage, cookies, IDB) unconditionally on lockdown. Previously only real high/critical keys were wiped, leaving honey keys intact as identifiable survivors.   |
+| Orphan honey key cleanup  | `cleanOrphanedHoneyKeys()` fires as a background task at every `Tessera.unlock()`. Honey keys from prior sessions (orphans that the in-memory registry no longer tracks) are detected by their decrypt-OK-but-invalid-JSON signature and silently wiped. |
+
 ### 0.1.1
 
 Security hardening — no breaking API changes, no migration required.

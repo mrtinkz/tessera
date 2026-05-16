@@ -219,12 +219,15 @@ export const Tessera = {
       const idbAdapter = new IndexedDbAdapter(resolved, session, events, suspicion);
 
       suspicion.setOnLockdown(async () => {
-        session.lock();
+        // Nuke all t_ entries across every backend while the crypto key is still
+        // accessible, then lock. This prevents an attacker from identifying honey
+        // keys by elimination (survivors would otherwise reveal which keys were decoys).
         const wiped: string[] = [];
-        await localAdapter.wipeHighSensitivity(wiped);
-        await sessionAdapter.wipeHighSensitivity(wiped);
-        await cookieAdapter.wipeHighSensitivity(wiped);
-        await idbAdapter.wipeHighSensitivity(wiped);
+        await localAdapter.wipeAll(wiped);
+        await sessionAdapter.wipeAll(wiped);
+        await cookieAdapter.wipeAll(wiped);
+        await idbAdapter.wipeAll(wiped);
+        session.lock();
         events.emit('vault-locked', { reason: 'suspicion-lockdown' });
         return wiped;
       });
@@ -292,7 +295,21 @@ export const Tessera = {
           if (session.isLocked()) return;
           suspicion.recordHoneyHit(backend);
         },
+
+        _honeyStorageKeys(backend: 'local' | 'session' | 'cookie'): string[] {
+          return honeyManager.allKeys(backend);
+        },
       };
+
+      // Fire orphan honey key cleanup in the background. Orphans are honey entries
+      // from previous sessions whose in-memory tracking was lost on page reload.
+      // Wiping them prevents unbounded storage accumulation and ensures the honey
+      // count stays accurate. Errors are swallowed inside each adapter.
+      void Promise.all([
+        localAdapter.cleanOrphanedHoneyKeys(),
+        sessionAdapter.cleanOrphanedHoneyKeys(),
+        cookieAdapter.cleanOrphanedHoneyKeys(),
+      ]);
 
       return enhancedVault;
     } catch (error) {

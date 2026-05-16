@@ -413,4 +413,109 @@ describe('LocalStorageAdapter', () => {
     expect(await adapter.getItem('high')).toBeNull();
     expect(await adapter.getItem('low')).toBe('lo-val');
   });
+
+  // wipeAll: removes every t_ entry regardless of sensitivity or honey status
+  it('wipeAll removes all t_ entries including honey and low-sensitivity keys', async () => {
+    const config = resolveConfig({ honeyKeys: { count: 2 } } as Parameters<
+      typeof resolveConfig
+    >[0]);
+    const { HoneyKeyManager } = await import('../../src/storage/honey');
+    const mgr = new HoneyKeyManager(config);
+    const adapter = new LocalStorageAdapter(config, session, new TesseraEmitter());
+    adapter.setHoneyManager(mgr);
+
+    await adapter.setItem('low-key', 'lo', { sensitivity: 'low' });
+    await adapter.setItem('high-key', 'hi', { sensitivity: 'high' });
+    const honeyKeysBefore = mgr.allKeys('local');
+    expect(honeyKeysBefore.length).toBe(2);
+
+    // Confirm all three kinds of t_ entry exist before wipe
+    const tKeysBefore = Object.keys(localStorage).filter((k) => k.startsWith('t_'));
+    expect(tKeysBefore.length).toBeGreaterThanOrEqual(3); // 2 real + 2 honey
+
+    const wiped: string[] = [];
+    await adapter.wipeAll(wiped);
+
+    // No t_ entries remain
+    const tKeysAfter = Object.keys(localStorage).filter((k) => k.startsWith('t_'));
+    expect(tKeysAfter.length).toBe(0);
+
+    // wiped list contains all removed keys
+    expect(wiped.length).toBeGreaterThanOrEqual(3);
+    expect(wiped.every((w) => w.startsWith('local:'))).toBe(true);
+
+    // Honey manager registry cleared
+    expect(mgr.allKeys('local').length).toBe(0);
+
+    // Reads return null after wipeAll
+    expect(await adapter.getItem('low-key')).toBeNull();
+    expect(await adapter.getItem('high-key')).toBeNull();
+  });
+
+  // cleanOrphanedHoneyKeys: wipes orphaned honey entries, leaves real keys intact
+  it('cleanOrphanedHoneyKeys wipes orphaned honey entries but preserves real keys', async () => {
+    const config = resolveConfig({ honeyKeys: { count: 2 } } as Parameters<
+      typeof resolveConfig
+    >[0]);
+    const { HoneyKeyManager } = await import('../../src/storage/honey');
+
+    // Session 1: write real key + honey keys
+    const mgr1 = new HoneyKeyManager(config);
+    const adapter1 = new LocalStorageAdapter(config, session, new TesseraEmitter());
+    adapter1.setHoneyManager(mgr1);
+    await adapter1.setItem('persist', 'still-here', { sensitivity: 'low' });
+    const orphanKeys = mgr1.allKeys('local');
+    expect(orphanKeys.length).toBe(2);
+
+    // Session 2: fresh manager (simulates page reload — registry is empty)
+    const mgr2 = new HoneyKeyManager(config);
+    const adapter2 = new LocalStorageAdapter(config, session, new TesseraEmitter());
+    adapter2.setHoneyManager(mgr2);
+
+    // Orphans exist in storage but mgr2 doesn't know about them
+    expect(orphanKeys.every((k) => localStorage.getItem(k) !== null)).toBe(true);
+
+    await adapter2.cleanOrphanedHoneyKeys();
+
+    // Orphaned honey keys are wiped
+    for (const k of orphanKeys) {
+      expect(localStorage.getItem(k)).toBeNull();
+    }
+
+    // Real key is unaffected
+    expect(await adapter2.getItem('persist')).toBe('still-here');
+  });
+
+  // cleanOrphanedHoneyKeys: skips live honey keys tracked in current session
+  it('cleanOrphanedHoneyKeys skips honey keys registered in the current session', async () => {
+    const config = resolveConfig({ honeyKeys: { count: 2 } } as Parameters<
+      typeof resolveConfig
+    >[0]);
+    const { HoneyKeyManager } = await import('../../src/storage/honey');
+    const mgr = new HoneyKeyManager(config);
+    const adapter = new LocalStorageAdapter(config, session, new TesseraEmitter());
+    adapter.setHoneyManager(mgr);
+
+    await adapter.setItem('live-key', 'val');
+    const liveHoneyKeys = mgr.allKeys('local');
+    expect(liveHoneyKeys.length).toBe(2);
+
+    await adapter.cleanOrphanedHoneyKeys();
+
+    // Live honey keys must NOT be wiped
+    for (const k of liveHoneyKeys) {
+      expect(localStorage.getItem(k)).not.toBeNull();
+    }
+  });
+
+  // cleanOrphanedHoneyKeys: returns immediately when vault is locked
+  it('cleanOrphanedHoneyKeys does nothing when vault is locked', async () => {
+    const adapter = new LocalStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('k', 'v');
+    session.lock();
+    const tKeysBefore = Object.keys(localStorage).filter((k) => k.startsWith('t_'));
+    await adapter.cleanOrphanedHoneyKeys();
+    const tKeysAfter = Object.keys(localStorage).filter((k) => k.startsWith('t_'));
+    expect(tKeysAfter).toEqual(tKeysBefore);
+  });
 });

@@ -377,7 +377,22 @@ export async function rotateKeyName(hmacKey: CryptoKey, developerKey: string): P
 }
 
 export async function generateHoneyCiphertext(key: CryptoKey): Promise<string> {
-  const noise = crypto.getRandomValues(new Uint8Array(32));
-  const fakePlaintext = uint8ArrayToHex(noise);
-  return encryptWithSalt(key, fakePlaintext);
+  // Produce the same encryptedMeta.encryptedValue two-blob format as real entries.
+  // Vary plaintext lengths so honey keys are indistinguishable from real ones by
+  // storage size alone.
+  //
+  // Meta blob: 80–165 chars — matches typical JSON metadata payload sizes.
+  const [metaByte = 0, valueByte = 0] = crypto.getRandomValues(new Uint8Array(2));
+  const metaLen = 80 + (metaByte % 86);
+  const metaNoise = crypto.getRandomValues(new Uint8Array(Math.ceil(metaLen / 2)));
+  const fakeMetaPlaintext = uint8ArrayToHex(metaNoise).slice(0, metaLen);
+
+  // Value blob: 16–144 chars — covers the range of real stored value sizes.
+  const valueLen = 16 + (valueByte % 129);
+  const valueNoise = crypto.getRandomValues(new Uint8Array(Math.ceil(valueLen / 2)));
+  const fakeValuePlaintext = uint8ArrayToHex(valueNoise).slice(0, valueLen);
+
+  const encryptedMeta = await encryptWithSalt(key, fakeMetaPlaintext);
+  const encryptedValue = await encryptWithSalt(key, fakeValuePlaintext);
+  return `${encryptedMeta}.${encryptedValue}`;
 }

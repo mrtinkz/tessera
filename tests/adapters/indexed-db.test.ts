@@ -5,6 +5,7 @@ import { KeySession } from '../../src/core/session';
 import { deriveKey, deriveHmacKey, getSalt, encryptWithSalt } from '../../src/core/crypto';
 import { resolveConfig } from '../../src/core/config';
 import { TesseraEmitter } from '../../src/core/events';
+import { SuspicionEngine } from '../../src/core/suspicion';
 
 // Helper to directly overwrite a record's value in the IDB tessera_data store
 async function overwriteIdbValue(
@@ -397,6 +398,82 @@ describe('IndexedDbAdapter', () => {
     await adapter.put('low-store', 'low-key', 'low-val', { sensitivity: 'low' });
     const result = await adapter.get('low-store', 'low-key');
     expect(result).toBe('low-val');
+  });
+
+  // Rate limit branch in get() (covers lines 121-126)
+  it('should return undefined when suspicion rate limit is exceeded in get()', async () => {
+    const config = resolveConfig({
+      suspicion: {
+        rateLimit: { callsPerSecond: 2, scorePerExcess: 1 },
+        thresholds: { lockdown: 10_000 },
+      },
+    });
+    const events = new TesseraEmitter();
+    const suspicion = new SuspicionEngine(config, events);
+    const adapter = new IndexedDbAdapter(config, session, events, suspicion);
+    await adapter.put('rate-idb', 'rate-key', 'rate-val');
+
+    let lastResult: unknown;
+    for (let i = 0; i < 6; i++) {
+      lastResult = await adapter.get('rate-idb', 'rate-key');
+    }
+    expect(lastResult).toBeUndefined();
+    suspicion.destroy();
+  });
+
+  // JSON.parse catch branch in get() (covers line 157)
+  it('should return undefined when IDB value decrypts to non-JSON text', async () => {
+    const adapter = new IndexedDbAdapter(resolveConfig(), session, new TesseraEmitter());
+    const cryptoKey = session.getKey();
+    const meta = JSON.stringify({
+      writeTime: Date.now(),
+      readCount: 0,
+      sensitivity: 'low',
+      onSuspicion: 'wipe',
+    });
+    const encMeta = await encryptWithSalt(cryptoKey, meta);
+    // Value encrypts to a plain string that is not valid JSON
+    const encVal = await encryptWithSalt(cryptoKey, 'not-json-at-all{{{');
+    const storageKey = await session.rotateKeyName('non-json-idb-key');
+    await overwriteIdbValue('non-json-idb-store', storageKey, `${encMeta}.${encVal}`);
+
+    const result = await adapter.get('non-json-idb-store', 'non-json-idb-key');
+    expect(result).toBeUndefined();
+  });
+
+  // checkQuota: storage-quota-warning emitted when usage exceeds 80% threshold (covers lines 50-54)
+  it('should emit storage-quota-warning when storage usage exceeds 80% quota', async () => {
+    // happy-dom does not provide navigator.storage; define it for this test only
+    const storageMock = { estimate: vi.fn().mockResolvedValue({ usage: 900, quota: 1000 }) };
+    Object.defineProperty(navigator, 'storage', {
+      configurable: true,
+      writable: true,
+      value: storageMock,
+    });
+
+    const events = new TesseraEmitter();
+    const handler = vi.fn();
+    events.on('storage-quota-warning', handler);
+
+    try {
+      const adapter = new IndexedDbAdapter(resolveConfig(), session, events);
+      await adapter.put('quota-check', 'key', 'val');
+      // checkQuota is fire-and-forget; give it a tick to resolve
+      await new Promise((r) => setTimeout(r, 30));
+      expect(handler).toHaveBeenCalledWith(
+        expect.objectContaining({ backend: 'idb', usedBytes: 900, quotaBytes: 1000 }),
+      );
+    } finally {
+      try {
+        Object.defineProperty(navigator, 'storage', {
+          configurable: true,
+          writable: true,
+          value: undefined,
+        });
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
   });
 
   // applyOnSuspicion – wipe (default)

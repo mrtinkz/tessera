@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import 'fake-indexeddb/auto';
 import { Tessera } from '../../src/tessera';
 import { TesseraErrorCode } from '../../src/types';
 import { resetLockout } from '../../src/core/lockout';
@@ -243,6 +244,78 @@ describe('Tessera.unlock', () => {
     expect(vault.isLocked()).toBe(true);
   });
 
+  // ── Issue 1: lockdown wipe ordering ──────────────────────────────────────────
+
+  it('lockdown: wipes high-sensitivity keys from storage before locking', async () => {
+    const vault = await Tessera.unlock('246813', {
+      suspicion: { thresholds: { lockdown: 1 } },
+    } as Parameters<typeof Tessera.unlock>[1]);
+
+    await vault.local.setItem('secret', 'sensitive-data', { sensitivity: 'high' });
+    const rawKey = await vault.local.getRawKey!('secret');
+    expect(localStorage.getItem(rawKey)).not.toBeNull();
+
+    vault._simulateHoneyHit('local');
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(vault.isLocked()).toBe(true);
+    expect(localStorage.getItem(rawKey)).toBeNull();
+  });
+
+  it('lockdown: wipes critical-sensitivity keys from storage before locking', async () => {
+    const vault = await Tessera.unlock('246813', {
+      suspicion: { thresholds: { lockdown: 1 } },
+    } as Parameters<typeof Tessera.unlock>[1]);
+
+    await vault.local.setItem('crit', 'top-secret', { sensitivity: 'critical' });
+    const rawKey = await vault.local.getRawKey!('crit');
+    expect(localStorage.getItem(rawKey)).not.toBeNull();
+
+    vault._simulateHoneyHit('local');
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(vault.isLocked()).toBe(true);
+    expect(localStorage.getItem(rawKey)).toBeNull();
+  });
+
+  it('lockdown: also wipes low-sensitivity keys (wipeAll nukes everything)', async () => {
+    const vault = await Tessera.unlock('246813', {
+      suspicion: { thresholds: { lockdown: 1 } },
+    } as Parameters<typeof Tessera.unlock>[1]);
+
+    await vault.local.setItem('pub', 'public-data', { sensitivity: 'low' });
+    const rawKey = await vault.local.getRawKey!('pub');
+    expect(localStorage.getItem(rawKey)).not.toBeNull();
+
+    vault._simulateHoneyHit('local');
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(vault.isLocked()).toBe(true);
+    // wipeAll nukes every t_ entry — low-sensitivity keys no longer survive lockdown
+    expect(localStorage.getItem(rawKey)).toBeNull();
+  });
+
+  it('lockdown: suspicion-lockdown event lists wiped key paths', async () => {
+    const vault = await Tessera.unlock('246813', {
+      suspicion: { thresholds: { lockdown: 1 } },
+    } as Parameters<typeof Tessera.unlock>[1]);
+
+    await vault.local.setItem('k1', 'val', { sensitivity: 'high' });
+    await vault.local.setItem('k2', 'val', { sensitivity: 'critical' });
+
+    let wiped: string[] = [];
+    vault.on('suspicion-lockdown', (p) => {
+      wiped = p.keysWiped;
+    });
+
+    vault._simulateHoneyHit('local');
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(wiped.length).toBeGreaterThanOrEqual(2);
+    // wipeAll includes both local: entries and the idb:* sentinel
+    expect(wiped.every((k) => k.startsWith('local:') || k === 'idb:*')).toBe(true);
+  });
+
   // vault-unlocked event emitted on unlock — test the event comes through by registering
   // a handler on the vault we get back
   it('should emit vault-unlocked event on second unlock (stored verifier path)', async () => {
@@ -316,5 +389,67 @@ describe('Tessera.unlock', () => {
     vault.lock();
     expect(h1).not.toHaveBeenCalled();
     expect(h2).not.toHaveBeenCalled();
+  });
+
+  // wipeAll on lockdown: every t_ entry is removed — real, honey, and low-sensitivity
+  it('lockdown nukes all t_ entries including honey and low-sensitivity keys', async () => {
+    const vault = await Tessera.unlock('246813', {
+      honeyKeys: { count: 2 },
+      suspicion: { thresholds: { lockdown: 1 } },
+    } as Parameters<typeof Tessera.unlock>[1]);
+
+    // Write keys at different sensitivity levels
+    await vault.local.setItem('low-key', 'lo', { sensitivity: 'low' });
+    await vault.local.setItem('high-key', 'hi', { sensitivity: 'high' });
+
+    // Confirm t_ entries exist (2 real + 2 honey)
+    const tKeysBefore = Object.keys(localStorage).filter((k) => k.startsWith('t_'));
+    expect(tKeysBefore.length).toBeGreaterThanOrEqual(3);
+
+    let keysWiped: string[] = [];
+    vault.on('suspicion-lockdown', (p) => {
+      keysWiped = p.keysWiped;
+    });
+    vault._simulateHoneyHit('local');
+    await new Promise((r) => setTimeout(r, 50));
+
+    // All t_ entries must be gone
+    const tKeysAfter = Object.keys(localStorage).filter((k) => k.startsWith('t_'));
+    expect(tKeysAfter.length).toBe(0);
+
+    // keysWiped includes real and honey entries (plus idb:* sentinel)
+    expect(keysWiped.length).toBeGreaterThanOrEqual(3);
+    expect(keysWiped.every((w: string) => w.startsWith('local:') || w === 'idb:*')).toBe(true);
+  });
+
+  // cleanOrphanedHoneyKeys fires at unlock and wipes orphans from prior session
+  it('unlock fires background orphan cleanup that wipes orphaned honey keys', async () => {
+    // Session 1: write key + generate honey keys, then lock
+    const vault1 = await Tessera.unlock('246813', { honeyKeys: { count: 2 } });
+    await vault1.local.setItem('real', 'value');
+    const honeyKeys1 = vault1._honeyStorageKeys('local');
+    expect(honeyKeys1.length).toBe(2);
+    vault1.lock();
+
+    // Confirm orphans are in localStorage
+    for (const k of honeyKeys1) {
+      expect(localStorage.getItem(k)).not.toBeNull();
+    }
+
+    // Session 2: unlock fires cleanOrphanedHoneyKeys in background
+    const vault2 = await Tessera.unlock('246813', { honeyKeys: { count: 2 } });
+
+    // Allow background microtasks to settle
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Orphaned honey keys from session 1 must be wiped
+    for (const k of honeyKeys1) {
+      expect(localStorage.getItem(k)).toBeNull();
+    }
+
+    // Real key is still readable
+    expect(await vault2.local.getItem('real')).toBe('value');
+
+    vault2.lock();
   });
 });

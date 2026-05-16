@@ -1,6 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { HoneyKeyManager } from '../../src/storage/honey';
 import { resolveConfig } from '../../src/core/config';
+import { Tessera } from '../../src/tessera';
+import { resetLockout } from '../../src/core/lockout';
 
 function makeManager(count = 3): HoneyKeyManager {
   const config = resolveConfig({ honeyKeys: { count } });
@@ -125,4 +127,58 @@ describe('HoneyKeyManager', () => {
     const keys = mgr.generateHoneyKeys('local', existing, 2);
     expect(keys.every((k) => !existing.includes(k))).toBe(true);
   });
+});
+
+// ── Issue 2: honey key structural indistinguishability ────────────────────────
+
+describe('HoneyKeyManager — storage format matches real entries', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    resetLockout();
+  });
+
+  it('honey keys written to localStorage use the same two-blob encryptedMeta.encryptedValue format as real entries', async () => {
+    const vault = await Tessera.unlock('246813', { honeyKeys: { count: 3 } });
+    // Writing a real key triggers honey key generation in addHoneyKeys()
+    await vault.local.setItem('mykey', 'myvalue');
+
+    // Collect all t_-prefixed entries
+    const entries: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k?.startsWith('t_')) entries.push(localStorage.getItem(k)!);
+    }
+
+    expect(entries.length).toBeGreaterThan(0);
+    // Every entry — both real and honey — must have exactly one dot
+    for (const raw of entries) {
+      const dots = (raw.match(/\./g) ?? []).length;
+      expect(dots).toBe(1);
+    }
+  });
+
+  it('honey key value blobs vary in length (no length-based fingerprinting)', async () => {
+    // 5 × Tessera.unlock() ≈ 5 × 1–2 s PBKDF2 — needs extended timeout
+    // Unlock multiple times in fresh vaults to collect many honey key entries
+    const valueLengths = new Set<number>();
+
+    for (let i = 0; i < 5; i++) {
+      localStorage.clear();
+      resetLockout();
+      const vault = await Tessera.unlock('246813', { honeyKeys: { count: 3 } });
+      await vault.local.setItem('k', 'v');
+
+      const rawKey = await vault.local.getRawKey!('k');
+      for (let j = 0; j < localStorage.length; j++) {
+        const storageKey = localStorage.key(j);
+        if (storageKey?.startsWith('t_') && storageKey !== rawKey) {
+          const raw = localStorage.getItem(storageKey)!;
+          valueLengths.add(raw.split('.')[1].length);
+        }
+      }
+    }
+
+    // Across 15 honey key entries (5 vaults × 3 keys) we expect multiple distinct lengths
+    expect(valueLengths.size).toBeGreaterThan(1);
+  }, 30_000);
 });

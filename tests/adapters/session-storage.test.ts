@@ -380,6 +380,73 @@ describe('SessionStorageAdapter', () => {
     expect(await adapter.getItem('low')).toBe('lo-val');
   });
 
+  // wipeAll: removes every t_ entry regardless of sensitivity or honey status
+  it('wipeAll removes all t_ entries including honey and low-sensitivity keys', async () => {
+    const config = resolveConfig({ honeyKeys: { count: 2 } } as Parameters<
+      typeof resolveConfig
+    >[0]);
+    const { HoneyKeyManager } = await import('../../src/storage/honey');
+    const mgr = new HoneyKeyManager(config);
+    const adapter = new SessionStorageAdapter(config, session, new TesseraEmitter());
+    adapter.setHoneyManager(mgr);
+
+    await adapter.setItem('low-key', 'lo', { sensitivity: 'low' });
+    await adapter.setItem('high-key', 'hi', { sensitivity: 'high' });
+    expect(mgr.allKeys('session').length).toBe(2);
+
+    const tKeysBefore = Object.keys(sessionStorage).filter((k) => k.startsWith('t_'));
+    expect(tKeysBefore.length).toBeGreaterThanOrEqual(3);
+
+    const wiped: string[] = [];
+    await adapter.wipeAll(wiped);
+
+    const tKeysAfter = Object.keys(sessionStorage).filter((k) => k.startsWith('t_'));
+    expect(tKeysAfter.length).toBe(0);
+    expect(wiped.every((w) => w.startsWith('session:'))).toBe(true);
+    expect(mgr.allKeys('session').length).toBe(0);
+  });
+
+  // cleanOrphanedHoneyKeys: wipes orphaned honey entries, leaves real keys intact
+  it('cleanOrphanedHoneyKeys wipes orphaned honey entries but preserves real keys', async () => {
+    const config = resolveConfig({ honeyKeys: { count: 2 } } as Parameters<
+      typeof resolveConfig
+    >[0]);
+    const { HoneyKeyManager } = await import('../../src/storage/honey');
+
+    // Session 1: write real key + honey keys
+    const mgr1 = new HoneyKeyManager(config);
+    const adapter1 = new SessionStorageAdapter(config, session, new TesseraEmitter());
+    adapter1.setHoneyManager(mgr1);
+    await adapter1.setItem('persist', 'still-here', { sensitivity: 'low' });
+    const orphanKeys = mgr1.allKeys('session');
+    expect(orphanKeys.length).toBe(2);
+
+    // Session 2: fresh manager (simulates page reload)
+    const mgr2 = new HoneyKeyManager(config);
+    const adapter2 = new SessionStorageAdapter(config, session, new TesseraEmitter());
+    adapter2.setHoneyManager(mgr2);
+
+    expect(orphanKeys.every((k) => sessionStorage.getItem(k) !== null)).toBe(true);
+
+    await adapter2.cleanOrphanedHoneyKeys();
+
+    for (const k of orphanKeys) {
+      expect(sessionStorage.getItem(k)).toBeNull();
+    }
+    expect(await adapter2.getItem('persist')).toBe('still-here');
+  });
+
+  // cleanOrphanedHoneyKeys: returns immediately when vault is locked
+  it('cleanOrphanedHoneyKeys does nothing when vault is locked', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.setItem('k', 'v');
+    session.lock();
+    const tKeysBefore = Object.keys(sessionStorage).filter((k) => k.startsWith('t_'));
+    await adapter.cleanOrphanedHoneyKeys();
+    const tKeysAfter = Object.keys(sessionStorage).filter((k) => k.startsWith('t_'));
+    expect(tKeysAfter).toEqual(tKeysBefore);
+  });
+
   // addHoneyKeys: needed <= 0 branch (honey manager already has enough keys for the backend)
   it('should skip honey key generation when needed count is already satisfied', async () => {
     const config = resolveConfig({ honeyKeys: { count: 2 } } as Parameters<
@@ -411,6 +478,68 @@ describe('SessionStorageAdapter', () => {
     // Reading it back without idb returns null (no claim source)
     const result = await adapter.getItem('claim-no-idb');
     expect(result).toBeNull();
+  });
+
+  // getRawKey when locked returns developer key unchanged (covers line 200 true branch)
+  it('should return the developer key unchanged from getRawKey when vault is locked', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    session.lock();
+    const result = await adapter.getRawKey!('my-developer-key');
+    expect(result).toBe('my-developer-key');
+  });
+
+  // handleSplitWrite false branch of `if (this.idb)` (covers lines 200-219 false branch)
+  it('should write split: prefix to sessionStorage without IDB when no idb adapter set', async () => {
+    const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    // No idb adapter → handleSplitWrite skips the `if (this.idb)` block
+    await adapter.setItem('split-no-idb-2', 'val', { mode: 'split' });
+    const rawKey = await adapter.getRawKey!('split-no-idb-2');
+    const raw = sessionStorage.getItem(rawKey);
+    expect(raw).not.toBeNull();
+    expect(raw?.startsWith('split:')).toBe(true);
+  });
+
+  // wipeHighSensitivity: skips split: and ref: prefixed entries (covers lines 148-163)
+  it('should skip split: and ref: entries during wipeHighSensitivity', async () => {
+    const config = resolveConfig();
+    const events = new TesseraEmitter();
+    const idbAdapter = new IndexedDbAdapter(config, session, events);
+    const adapter = new SessionStorageAdapter(config, session, events);
+    adapter.setIdbAdapter(idbAdapter);
+
+    // split-mode item → stored as split:... prefix
+    await adapter.setItem('split-wipe', 'split-val', { mode: 'split' });
+    // claim-mode item → stored as ref:... prefix
+    await adapter.setItem('claim-wipe', 'claim-val', { mode: 'claim' });
+    // high-sensitivity direct item → should be wiped
+    await adapter.setItem('high-wipe', 'high-val', { sensitivity: 'high' });
+
+    const rawSplitKey = await adapter.getRawKey!('split-wipe');
+    const rawClaimKey = await adapter.getRawKey!('claim-wipe');
+
+    const wiped: string[] = [];
+    await adapter.wipeHighSensitivity(wiped);
+
+    expect(wiped.some((w) => w.includes('session:'))).toBe(true);
+    // split: and ref: entries must survive (skipped by wipeHighSensitivity)
+    expect(sessionStorage.getItem(rawSplitKey)).not.toBeNull();
+    expect(sessionStorage.getItem(rawClaimKey)).not.toBeNull();
+    // high-sensitivity direct item must be gone
+    expect(await adapter.getItem('high-wipe')).toBeNull();
+  });
+
+  // getItem: storageKey null branch (covers line 73) — session has key but no HMAC key
+  it('should return null from getItem when rotateKeyNameSafe returns null (no HMAC key)', async () => {
+    const testSession = new KeySession();
+    const salt = await getSalt();
+    const key = await deriveKey('246813', salt);
+    testSession.setKey(key, 900_000);
+    // Intentionally no setHmacKey → rotateKeyNameSafe returns null while getKeySafe succeeds
+
+    const adapter = new SessionStorageAdapter(resolveConfig(), testSession, new TesseraEmitter());
+    const result = await adapter.getItem('any-key');
+    expect(result).toBeNull();
+    testSession.reset();
   });
 
   // buildMeta false branches: low sensitivity has no ttl/maxReads/halfLifeHard defaults

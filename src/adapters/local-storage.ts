@@ -103,6 +103,28 @@ export class LocalStorageAdapter implements IStorageAdapter {
     this.events?.emit('key-wiped', { keyAlias: key, backend: 'local', reason: 'removed' });
   }
 
+  async wipeAll(wiped: string[]): Promise<void> {
+    const backend = {
+      setItem: (k: string, v: string): void => this.rawSetItem(k, v),
+      removeItem: (k: string): void => this.rawRemoveItem(k),
+    };
+    const storageKeys: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      /* v8 ignore next */
+      if (k?.startsWith('t_')) storageKeys.push(k);
+    }
+    for (const storageKey of storageKeys) {
+      await hardWipe(backend, storageKey);
+      wiped.push(`local:${storageKey}`);
+    }
+    this.keyRegistry.clear();
+    this.sensitivityRegistry.clear();
+    if (this.honeyManager && 'clearBackend' in this.honeyManager) {
+      (this.honeyManager as HoneyKeyManager).clearBackend('local');
+    }
+  }
+
   async wipeHighSensitivity(wiped: string[]): Promise<void> {
     const cryptoKey = this.session.getKeySafe();
     if (!cryptoKey) return;
@@ -148,6 +170,40 @@ export class LocalStorageAdapter implements IStorageAdapter {
         this.keyRegistry.delete(key);
         this.sensitivityRegistry.delete(key);
       }
+    }
+  }
+
+  async cleanOrphanedHoneyKeys(): Promise<void> {
+    try {
+      const cryptoKey = this.session.getKeySafe();
+      if (!cryptoKey) return;
+      const storageKeys: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        /* v8 ignore next */
+        if (k?.startsWith('t_')) storageKeys.push(k);
+      }
+      for (const storageKey of storageKeys) {
+        if (this.session.getKeySafe() === null) return;
+        if (this.honeyManager?.isHoney('local', storageKey)) continue;
+        const raw = this.rawGetItem(storageKey);
+        if (!raw) continue;
+        const dotIdx = raw.indexOf('.');
+        if (dotIdx === -1) continue;
+        const metaResult = await decryptFull(cryptoKey, raw.slice(0, dotIdx));
+        if (!metaResult.ok) continue;
+        try {
+          JSON.parse(metaResult.value);
+        } catch {
+          // Decrypts but is not valid JSON — orphaned honey key from a previous session
+          await hardWipe(
+            { setItem: (k, v) => this.rawSetItem(k, v), removeItem: (k) => this.rawRemoveItem(k) },
+            storageKey,
+          );
+        }
+      }
+    } catch {
+      // Background task — never propagate errors
     }
   }
 

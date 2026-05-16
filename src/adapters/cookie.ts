@@ -338,6 +338,30 @@ export class CookieAdapter implements ICookieAdapter {
     return null;
   }
 
+  async wipeAll(wiped: string[]): Promise<void> {
+    const backend = {
+      setItem: (k: string, v: string): void => this.writeCookieRaw(k, v),
+      removeItem: (k: string): void => this.writeCookieExpired(k),
+    };
+    // Wipe real cookies tracked in the in-session registry
+    for (const name of this.cookieNames) {
+      await hardWipe(backend, name);
+      wiped.push(`cookie:${name}`);
+    }
+    // Wipe honey cookies (t_-prefixed, not in cookieNames)
+    for (const name of this.allTCookieNames()) {
+      if (!this.cookieNames.has(name)) {
+        await hardWipe(backend, name);
+        wiped.push(`cookie:${name}`);
+      }
+    }
+    this.cookieNames.clear();
+    this.sensitivityRegistry.clear();
+    if (this.honeyManager && 'clearBackend' in this.honeyManager) {
+      (this.honeyManager as import('../storage/honey').HoneyKeyManager).clearBackend('cookie');
+    }
+  }
+
   async wipeHighSensitivity(wiped: string[]): Promise<void> {
     for (const [name, sensitivity] of this.sensitivityRegistry) {
       if (sensitivity === 'high' || sensitivity === 'critical') {
@@ -347,6 +371,51 @@ export class CookieAdapter implements ICookieAdapter {
         this.sensitivityRegistry.delete(name);
       }
     }
+  }
+
+  async cleanOrphanedHoneyKeys(): Promise<void> {
+    try {
+      const cryptoKey = this.session.getKeySafe();
+      if (!cryptoKey) return;
+      const cookieNames = this.allTCookieNames();
+      for (const name of cookieNames) {
+        if (this.session.getKeySafe() === null) return;
+        if (this.honeyManager?.isHoney('cookie', name)) continue;
+        const raw = this.readRaw(name);
+        if (!raw) continue;
+        const value = decodeURIComponent(raw);
+        if (value.startsWith(CLAIM_PREFIX)) continue;
+        const dotIdx = value.indexOf('.');
+        if (dotIdx === -1) continue;
+        const metaResult = await decryptFull(cryptoKey, value.slice(0, dotIdx));
+        if (!metaResult.ok) continue;
+        try {
+          JSON.parse(metaResult.value);
+        } catch {
+          await hardWipe(
+            {
+              setItem: (k, v) => this.writeCookieRaw(k, v),
+              removeItem: (k) => this.writeCookieExpired(k),
+            },
+            name,
+          );
+        }
+      }
+    } catch {
+      // Background task — never propagate errors
+    }
+  }
+
+  private allTCookieNames(): string[] {
+    const names: string[] = [];
+    if (!document?.cookie) return names;
+    for (const cookie of document.cookie.split('; ')) {
+      const eqIdx = cookie.indexOf('=');
+      if (eqIdx === -1) continue;
+      const name = decodeURIComponent(cookie.slice(0, eqIdx));
+      if (name.startsWith('t_')) names.push(name);
+    }
+    return names;
   }
 
   private async applyOnSuspicion(

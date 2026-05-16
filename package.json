@@ -1,6 +1,6 @@
 {
   "name": "@mrtinkz/tessera",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "One passcode. Your browser storage, encrypted. Zero dependencies.",
   "repository": {
     "type": "git",
@@ -16,10 +16,6 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "browser": {
-        "types": "./dist/index.d.ts",
-        "default": "./dist/index.global.global.js"
-      },
       "import": {
         "types": "./dist/index.d.ts",
         "default": "./dist/index.js"
@@ -67,9 +63,6 @@
     }
   },
   "sideEffects": false,
-  "engines": {
-    "node": ">=18.0.0"
-  },
   "files": [
     "dist/**/*.js",
     "dist/**/*.cjs",

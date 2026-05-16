@@ -416,4 +416,91 @@ describe('CookieAdapter', () => {
     await adapter.get('meta-corrupt');
     expect(handler).toHaveBeenCalled();
   });
+
+  // wipeAll: clears in-session registry, honey registry, and records wiped entries
+  it('wipeAll wipes real and honey cookies and clears all in-session registries', async () => {
+    const config = resolveConfig({ honeyKeys: { count: 2 } } as Parameters<
+      typeof resolveConfig
+    >[0]);
+    const { HoneyKeyManager } = await import('../../src/storage/honey');
+    const mgr = new HoneyKeyManager(config);
+    const adapter = new CookieAdapter(config, session, new TesseraEmitter());
+    adapter.setHoneyManager(mgr);
+
+    // Real cookies use developer names (low-c, high-c), honey keys use t_-prefixed names
+    await adapter.set('low-c', 'lo', { sensitivity: 'low' });
+    await adapter.set('high-c', 'hi', { sensitivity: 'high' });
+    expect(mgr.allKeys('cookie').length).toBe(2);
+
+    const wiped: string[] = [];
+    await adapter.wipeAll(wiped);
+
+    // wiped list covers real (low-c, high-c) + 2 honey t_ entries
+    expect(wiped.every((w) => w.startsWith('cookie:'))).toBe(true);
+    expect(wiped.includes('cookie:low-c')).toBe(true);
+    expect(wiped.includes('cookie:high-c')).toBe(true);
+    expect(wiped.filter((w) => w.includes('t_')).length).toBe(2);
+
+    // In-session honey registry cleared
+    expect(mgr.allKeys('cookie').length).toBe(0);
+
+    // t_-prefixed honey cookies gone from document.cookie
+    const tCookiesAfter = document.cookie
+      .split('; ')
+      .map((c) => decodeURIComponent(c.split('=')[0] ?? ''))
+      .filter((n) => n.startsWith('t_'));
+    expect(tCookiesAfter.length).toBe(0);
+  });
+
+  // cleanOrphanedHoneyKeys: wipes orphaned honey cookies, leaves real ones
+  it('cleanOrphanedHoneyKeys wipes orphaned honey cookies but preserves real entries', async () => {
+    const config = resolveConfig({ honeyKeys: { count: 2 } } as Parameters<
+      typeof resolveConfig
+    >[0]);
+    const { HoneyKeyManager } = await import('../../src/storage/honey');
+
+    // Session 1: write real key + honey keys
+    const mgr1 = new HoneyKeyManager(config);
+    const adapter1 = new CookieAdapter(config, session, new TesseraEmitter());
+    adapter1.setHoneyManager(mgr1);
+    await adapter1.set('persist', 'still-here', { sensitivity: 'low' });
+    const orphanKeys = mgr1.allKeys('cookie');
+    expect(orphanKeys.length).toBe(2);
+
+    // Session 2: fresh manager (simulates page reload)
+    const mgr2 = new HoneyKeyManager(config);
+    const adapter2 = new CookieAdapter(config, session, new TesseraEmitter());
+    adapter2.setHoneyManager(mgr2);
+
+    // Orphans are in document.cookie
+    const allCookieNames = new Set(
+      document.cookie.split('; ').map((c) => decodeURIComponent(c.split('=')[0] ?? '')),
+    );
+    expect(orphanKeys.every((k) => allCookieNames.has(k))).toBe(true);
+
+    await adapter2.cleanOrphanedHoneyKeys();
+
+    // Orphaned honey cookies are wiped
+    const afterNames = new Set(
+      document.cookie.split('; ').map((c) => decodeURIComponent(c.split('=')[0] ?? '')),
+    );
+    for (const k of orphanKeys) {
+      expect(afterNames.has(k)).toBe(false);
+    }
+    // Real cookie still readable
+    expect(await adapter2.get('persist')).toBe('still-here');
+  });
+
+  // cleanOrphanedHoneyKeys: returns immediately when vault is locked
+  it('cleanOrphanedHoneyKeys does nothing when vault is locked', async () => {
+    const adapter = new CookieAdapter(resolveConfig(), session, new TesseraEmitter());
+    await adapter.set('c', 'v');
+    const cookiesBefore = document.cookie;
+    session.lock();
+    await adapter.cleanOrphanedHoneyKeys();
+    // No cookies removed
+    const tBefore = cookiesBefore.split('; ').filter((c) => c.startsWith('t_'));
+    const tAfter = document.cookie.split('; ').filter((c) => c.startsWith('t_'));
+    expect(tAfter.length).toBe(tBefore.length);
+  });
 });

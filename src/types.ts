@@ -339,6 +339,9 @@ export interface IEnhancedVault extends ITesseraEmitter {
 
   /** Directly trigger a honey-hit for testing/demo purposes. */
   _simulateHoneyHit(backend: 'local' | 'session' | 'cookie'): void;
+
+  /** Returns the raw storage keys currently registered as honey keys for a backend. For demo/debug use only. */
+  _honeyStorageKeys(backend: 'local' | 'session' | 'cookie'): string[];
 }
 
 /** Legacy IVault for backwards compat (without event methods). */

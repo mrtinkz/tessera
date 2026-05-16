@@ -383,9 +383,34 @@ export class IndexedDbAdapter implements IIDBAdapter {
     });
   }
 
+  async wipeAll(wiped: string[]): Promise<void> {
+    /* v8 ignore next */
+    if (typeof indexedDB === 'undefined') return;
+    const db = await openDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(['tessera_data', '_claims', '_splits'], 'readwrite');
+      tx.objectStore('tessera_data').clear();
+      tx.objectStore('_claims').clear();
+      tx.objectStore('_splits').clear();
+      tx.oncomplete = (): void => {
+        db.close();
+        resolve();
+      };
+      /* v8 ignore next 4 */
+      tx.addEventListener('error', (): void => {
+        db.close();
+        reject();
+      });
+    });
+    wiped.push('idb:*');
+    this.sensitivityRegistry.clear();
+  }
+
   async wipeHighSensitivity(wiped: string[]): Promise<void> {
     const cryptoKey = this.session.getKeySafe();
     if (!cryptoKey) return;
+    /* v8 ignore next */
+    if (typeof indexedDB === 'undefined') return;
 
     // Scan the full IDB store — covers items from previous sessions not in the registry
     const db = await openDb();
