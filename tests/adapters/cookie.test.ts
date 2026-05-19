@@ -200,11 +200,11 @@ describe('CookieAdapter', () => {
   });
 
   // halfLife soft
-  it('should return null when halfLife.soft has elapsed and no reconfirm key', async () => {
+  it('should throw RECONFIRMATION_REQUIRED when halfLife.soft has elapsed and no reconfirm key', async () => {
     const adapter = new CookieAdapter(resolveConfig(), session, new TesseraEmitter());
     await adapter.set('hl-soft', 'v', { halfLife: { soft: 1 } });
     await new Promise((r) => setTimeout(r, 10));
-    expect(await adapter.get('hl-soft')).toBeNull();
+    await expect(adapter.get('hl-soft')).rejects.toMatchObject({ code: 'RECONFIRMATION_REQUIRED' });
   });
 
   it('should emit reconfirmation-required on soft half-life expiry', async () => {
@@ -214,7 +214,12 @@ describe('CookieAdapter', () => {
     events.on('reconfirmation-required', handler);
     await adapter.set('hl-soft-ev', 'v', { halfLife: { soft: 1 } });
     await new Promise((r) => setTimeout(r, 10));
-    await adapter.get('hl-soft-ev');
+    // getItem now throws after emitting the event
+    try {
+      await adapter.get('hl-soft-ev');
+    } catch {
+      /* expected RECONFIRMATION_REQUIRED */
+    }
     expect(handler).toHaveBeenCalled();
   });
 
@@ -428,12 +433,8 @@ describe('CookieAdapter', () => {
     adapter.setHoneyManager(mgr);
 
     // Real cookies use developer names (low-c, high-c), honey keys use t_-prefixed names
-    vi.useFakeTimers();
     await adapter.set('low-c', 'lo', { sensitivity: 'low' });
     await adapter.set('high-c', 'hi', { sensitivity: 'high' });
-    vi.runAllTimers();
-    vi.useRealTimers();
-    await new Promise((r) => setTimeout(r, 100));
     expect(mgr.allKeys('cookie').length).toBe(2);
 
     const wiped: string[] = [];
@@ -467,11 +468,7 @@ describe('CookieAdapter', () => {
     const mgr1 = new HoneyKeyManager(config);
     const adapter1 = new CookieAdapter(config, session, new TesseraEmitter());
     adapter1.setHoneyManager(mgr1);
-    vi.useFakeTimers();
     await adapter1.set('persist', 'still-here', { sensitivity: 'low' });
-    vi.advanceTimersByTime(2000);
-    vi.useRealTimers();
-    await new Promise((r) => setTimeout(r, 100));
     const orphanKeys = mgr1.allKeys('cookie');
     expect(orphanKeys.length).toBe(2);
 
@@ -510,5 +507,108 @@ describe('CookieAdapter', () => {
     const tBefore = cookiesBefore.split('; ').filter((c) => c.startsWith('t_'));
     const tAfter = document.cookie.split('; ').filter((c) => c.startsWith('t_'));
     expect(tAfter.length).toBe(tBefore.length);
+  });
+
+  // get() honey hit: isDecoyAlias — accessing a honey key via its decoy developer alias
+  it('get() records honey hit when called with a decoy alias', async () => {
+    const config = resolveConfig({ honeyKeys: { count: 1 } } as Parameters<
+      typeof resolveConfig
+    >[0]);
+    const { HoneyKeyManager } = await import('../../src/storage/honey');
+    const { SuspicionEngine } = await import('../../src/core/suspicion');
+    const events = new TesseraEmitter();
+    const suspicion = new SuspicionEngine(config, events);
+    const mgr = new HoneyKeyManager(config);
+    const adapter = new CookieAdapter(config, session, events, suspicion);
+    adapter.setHoneyManager(mgr);
+
+    await adapter.set('real-cookie', 'secret');
+    // Decoy aliases assigned by prepareHoneyKeys — get one
+    const decoyAliases = mgr.allDecoyAliases('cookie');
+    expect(decoyAliases.length).toBeGreaterThan(0);
+
+    const handler = vi.fn();
+    events.on('suspicion-score', handler);
+    const result = await adapter.get(decoyAliases[0]!);
+    expect(result).toBeNull();
+    // Suspicion score incremented (honey hit recorded)
+    expect(suspicion.score).toBeGreaterThan(0);
+    suspicion.destroy();
+  });
+
+  // get() honey hit: isHoney — accessing the raw t_<hex> storage name directly
+  it('get() records honey hit when called with the raw honey cookie name', async () => {
+    const config = resolveConfig({ honeyKeys: { count: 1 } } as Parameters<
+      typeof resolveConfig
+    >[0]);
+    const { HoneyKeyManager } = await import('../../src/storage/honey');
+    const { SuspicionEngine } = await import('../../src/core/suspicion');
+    const events = new TesseraEmitter();
+    const suspicion = new SuspicionEngine(config, events);
+    const mgr = new HoneyKeyManager(config);
+    const adapter = new CookieAdapter(config, session, events, suspicion);
+    adapter.setHoneyManager(mgr);
+
+    await adapter.set('real2', 'val');
+    const honeyStorageKeys = mgr.allKeys('cookie');
+    expect(honeyStorageKeys.length).toBe(1);
+
+    const result = await adapter.get(honeyStorageKeys[0]!);
+    expect(result).toBeNull();
+    expect(suspicion.score).toBeGreaterThan(0);
+    suspicion.destroy();
+  });
+
+  // claim mode + honey keys: writeHoneyKeysInterleaved fires honey writes after the real claim
+  it('claim mode with honey keys writes honey cookies alongside the claim pointer', async () => {
+    const config = resolveConfig({ honeyKeys: { count: 2 } } as Parameters<
+      typeof resolveConfig
+    >[0]);
+    const events = new TesseraEmitter();
+    const idbAdapter = new IndexedDbAdapter(config, session, events);
+    const adapter = new CookieAdapter(config, session, events);
+    adapter.setIdbAdapter(idbAdapter);
+    const { HoneyKeyManager } = await import('../../src/storage/honey');
+    const mgr = new HoneyKeyManager(config);
+    adapter.setHoneyManager(mgr);
+
+    await adapter.set('claim-honey-key', 'claim-honey-val', { mode: 'claim' });
+
+    // Real claim cookie exists
+    expect(adapter.readRaw('claim-honey-key')).not.toBeNull();
+    // Honey cookies are also written
+    const honeyKeys = mgr.allKeys('cookie');
+    expect(honeyKeys.length).toBe(2);
+    // Can still read the real value back
+    expect(await adapter.get('claim-honey-key')).toBe('claim-honey-val');
+  });
+
+  // ── maxValueBytes and onBeforeWrite ──────────────────────────────────────────
+
+  it('throws VALIDATION_ERROR when cookie value exceeds maxValueBytes', async () => {
+    const cfg = resolveConfig({ maxValueBytes: 5 });
+    const events = new TesseraEmitter();
+    const adapter = new CookieAdapter(cfg, session, events);
+    const { TesseraErrorCode } = await import('../../src/types');
+    await expect(adapter.set('k', 'this-value-is-longer-than-5-bytes')).rejects.toMatchObject({
+      code: TesseraErrorCode.VALIDATION_ERROR,
+    });
+  });
+
+  it('throws VALIDATION_ERROR when onBeforeWrite returns false for cookie', async () => {
+    const cfg = resolveConfig({ onBeforeWrite: () => false });
+    const events = new TesseraEmitter();
+    const adapter = new CookieAdapter(cfg, session, events);
+    const { TesseraErrorCode } = await import('../../src/types');
+    await expect(adapter.set('k', 'v')).rejects.toMatchObject({
+      code: TesseraErrorCode.VALIDATION_ERROR,
+    });
+  });
+
+  it('allows cookie write when onBeforeWrite returns true', async () => {
+    const cfg = resolveConfig({ onBeforeWrite: () => true });
+    const events = new TesseraEmitter();
+    const adapter = new CookieAdapter(cfg, session, events);
+    await expect(adapter.set('k', 'v')).resolves.not.toThrow();
   });
 });

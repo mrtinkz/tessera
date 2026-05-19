@@ -10,6 +10,7 @@ Thumbs.db
 # Manual-test example files — not committed, not published.
 example/tessera.js
 example/enhancement-demo.html
+example/.vanilla/tessera.js
 
 # Planning, progress, and design docs — not committed.
 PLAN.md
@@ -17,9 +18,22 @@ PROGRESS.md
 .details
 tessera-enhancement-plan.md
 
+# Audit / analysis output — local only.
+FINAL_REPORT.md
+.findings.md
+
 # Claude Code local config and memory.
 .claude/
 /example/react-demo
 
+# Local framework sandboxes — not committed, not published.
+/example/.vanilla
+/example/.react
+/example/.vue
+/example/.svelte
+/example/.angular
+
 # Codebase context graph (local reference only).
 .graph/
+.findings-v2.md
+SECURITY.md

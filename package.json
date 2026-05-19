@@ -1,6 +1,6 @@
 {
   "name": "@mrtinkz/tessera",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "One passcode. Your browser storage, encrypted. Zero dependencies.",
   "repository": {
     "type": "git",
@@ -60,6 +60,16 @@
         "types": "./dist/angular/index.d.cts",
         "default": "./dist/angular/index.cjs"
       }
+    },
+    "./pin-pad": {
+      "import": {
+        "types": "./dist/pin-pad/index.d.ts",
+        "default": "./dist/pin-pad/index.js"
+      },
+      "require": {
+        "types": "./dist/pin-pad/index.d.cts",
+        "default": "./dist/pin-pad/index.cjs"
+      }
     }
   },
   "sideEffects": false,
@@ -73,7 +83,7 @@
   ],
   "scripts": {
     "build": "tsup && npm run build:example",
-    "build:example": "node -e \"require('fs').copyFileSync('dist/index.global.global.js','example/tessera.js')\"",
+    "build:example": "node -e \"const fs=require('fs'),src='dist/index.global.global.js';fs.copyFileSync(src,'example/tessera.js');fs.mkdirSync('example/.vanilla',{recursive:true});fs.copyFileSync(src,'example/.vanilla/tessera.js');\"",
     "dev": "tsup --watch",
     "type-check": "tsc --noEmit",
     "lint": "eslint src/ --ext .ts,.tsx --max-warnings 25",

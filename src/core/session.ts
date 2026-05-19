@@ -18,6 +18,8 @@ interface SessionState {
   lastActivity: number;
   idleTimeout: number;
   timerId?: ReturnType<typeof setTimeout>;
+  /** Timer ID for the hard maxUnlockDuration, independent of idle resets. */
+  durationTimerId?: ReturnType<typeof setTimeout>;
   onAutoLock?: (() => void) | undefined;
 }
 
@@ -41,15 +43,25 @@ export class KeySession {
   private reconfirmKey: CryptoKey | null = null;
   private hmacKey: CryptoKey | null = null;
   private lockProof: string | null = null;
+  // One HMAC call per distinct developer key per session.
+  // Cleared on lock() / reset() so cross-session key names stay consistent.
+  private readonly keyNameCache = new Map<string, string>();
 
   /**
    * Stores the derived key and starts the idle-timeout timer.
    * Any previously held key is discarded and its timer cancelled.
    *
-   * @param key         - Non-extractable AES-GCM `CryptoKey`.
-   * @param idleTimeout - Milliseconds of inactivity before auto-lock.
+   * @param key                  - Non-extractable AES-GCM `CryptoKey`.
+   * @param idleTimeout          - Milliseconds of inactivity before auto-lock.
+   * @param onAutoLock           - Optional callback fired when the vault auto-locks.
+   * @param maxUnlockDurationMs  - Hard upper bound on unlock duration (not reset by activity).
    */
-  setKey(key: CryptoKey, idleTimeout: number, onAutoLock?: () => void): void {
+  setKey(
+    key: CryptoKey,
+    idleTimeout: number,
+    onAutoLock?: () => void,
+    maxUnlockDurationMs?: number,
+  ): void {
     this.clearTimer();
     this.closeChannel();
 
@@ -63,6 +75,13 @@ export class KeySession {
 
     this.startTimer();
     this.openChannel();
+
+    if (maxUnlockDurationMs !== undefined) {
+      this.state.durationTimerId = setTimeout(() => {
+        this.lock();
+        onAutoLock?.();
+      }, maxUnlockDurationMs);
+    }
   }
 
   /**
@@ -107,6 +126,7 @@ export class KeySession {
     }
     this.reconfirmKey = null;
     this.hmacKey = null;
+    this.keyNameCache.clear(); // Clear cache on lock.
     this.clearTimer();
     // Broadcast lock event to sibling tabs so they lock immediately.
     // Include a cryptographic proof so recipients can verify the sender holds the key.
@@ -212,12 +232,13 @@ export class KeySession {
     this.reconfirmKey = null;
     this.hmacKey = null;
     this.lockProof = null;
+    this.keyNameCache.clear(); // Clear cache on reset.
   }
 
   private startTimer(): void {
     if (this.state === null) return;
 
-    this.clearTimer();
+    this.clearIdleTimer();
 
     const onAutoLock = this.state.onAutoLock;
     this.state.timerId = setTimeout(() => {
@@ -226,12 +247,20 @@ export class KeySession {
     }, this.state.idleTimeout);
   }
 
-  private clearTimer(): void {
+  private clearIdleTimer(): void {
     if (this.state?.timerId !== undefined) {
       clearTimeout(this.state.timerId);
       // Cast through unknown to satisfy exactOptionalPropertyTypes — the
       // optional field must hold Timeout | undefined but we can only delete it.
       delete (this.state as { timerId?: ReturnType<typeof setTimeout> }).timerId;
+    }
+  }
+
+  private clearTimer(): void {
+    this.clearIdleTimer();
+    if (this.state?.durationTimerId !== undefined) {
+      clearTimeout(this.state.durationTimerId);
+      delete (this.state as { durationTimerId?: ReturnType<typeof setTimeout> }).durationTimerId;
     }
   }
 

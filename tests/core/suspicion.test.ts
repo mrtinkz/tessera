@@ -314,4 +314,47 @@ describe('SuspicionEngine', () => {
     expect(engine.currentScore).toBe(0);
     engine.destroy();
   });
+
+  // ── P6: seedInitialScore + setScoreUpdateCallback ─────────────────────────────
+
+  it('seedInitialScore seeds the engine before any increments (P6)', () => {
+    const config = resolveConfig();
+    const events = new TesseraEmitter();
+    const engine = new SuspicionEngine(config, events);
+    engine.seedInitialScore(30);
+    expect(engine.currentScore).toBeCloseTo(30, 0);
+    engine.destroy();
+  });
+
+  it('seedInitialScore is a no-op if already incremented (P6)', () => {
+    const config = resolveConfig();
+    const events = new TesseraEmitter();
+    const engine = new SuspicionEngine(config, events);
+    engine.increment(10);
+    engine.seedInitialScore(99); // should have no effect
+    expect(engine.currentScore).toBeCloseTo(10, 0);
+    engine.destroy();
+  });
+
+  it('seedInitialScore is a no-op for score <= 0 (P6)', () => {
+    const config = resolveConfig();
+    const events = new TesseraEmitter();
+    const engine = new SuspicionEngine(config, events);
+    engine.seedInitialScore(0);
+    expect(engine.currentScore).toBe(0);
+    engine.destroy();
+  });
+
+  it('setScoreUpdateCallback is called after each increment (P6)', () => {
+    const config = resolveConfig();
+    const events = new TesseraEmitter();
+    const engine = new SuspicionEngine(config, events);
+    const updates: number[] = [];
+    engine.setScoreUpdateCallback((score) => updates.push(score));
+    engine.increment(5);
+    engine.increment(5);
+    expect(updates).toHaveLength(2);
+    expect(updates[0]).toBeGreaterThan(0);
+    engine.destroy();
+  });
 });

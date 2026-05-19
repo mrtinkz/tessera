@@ -16,11 +16,21 @@ example/
 tsconfig.json
 tsup.config.ts
 vitest.config.ts
+*.tsbuildinfo
 
 # Planning / progress docs.
 PLAN.md
 PROGRESS.md
 CHANGELOG.md
+
+# Audit / analysis output — local only.
+FINAL_REPORT.md
+.findings.md
+.findings-v2.md
+
+# Local tooling dirs.
+.claude/
+.graph/
 
 # OS / editor noise.
 .DS_Store

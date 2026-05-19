@@ -2,10 +2,19 @@ import { type ResolvedConfig } from '../types';
 import { TesseraEmitter } from './events';
 
 const RATE_WINDOW_MS = 1000;
+// Fixed-capacity circular buffer replaces the grow-on-every-call number[].
+// 200 slots covers any realistic rate-limit scenario with zero GC pressure.
+const RATE_BUFFER_SIZE = 200;
 
 export class SuspicionEngine {
   private score = 0;
-  private callTimestamps: number[] = [];
+  // Track time of last increment for score decay.
+  private lastIncrementAt = 0;
+  // Track which graduated thresholds have already fired to avoid duplicates.
+  private readonly firedThresholds = new Set<string>();
+  // Circular buffer of timestamps (Float64Array avoids Int32 epoch overflow).
+  private readonly tsBuf = new Float64Array(RATE_BUFFER_SIZE);
+  private tsHead = 0;
   private hiddenAt = 0;
   private isMobile = false;
   private platformThreshold = 500;
@@ -14,12 +23,38 @@ export class SuspicionEngine {
   private events: TesseraEmitter;
   private visibilityListener: (() => void) | null = null;
   private onLockdownCallback: (() => Promise<string[]>) | null = null;
+  /** Fired after every score increment when persistScore is enabled. */
+  private onScoreUpdate: ((score: number, timestamp: number) => void) | null = null;
 
-  constructor(config: ResolvedConfig, events: TesseraEmitter) {
+  constructor(config: ResolvedConfig, events: TesseraEmitter, initialScore = 0) {
     this.config = config;
     this.events = events;
+    if (initialScore > 0) {
+      this.score = initialScore;
+      this.lastIncrementAt = Date.now();
+    }
     this.detectPlatform();
     this.setupVisibilityChange();
+  }
+
+  /**
+   * Register a callback that is invoked after each score increment.
+   * Use this to persist the score snapshot (e.g. HMAC-sign to localStorage).
+   */
+  setScoreUpdateCallback(cb: (score: number, timestamp: number) => void): void {
+    this.onScoreUpdate = cb;
+  }
+
+  /**
+   * Seed the engine with a pre-computed decayed score loaded from a persisted
+   * snapshot. Only takes effect if the engine has not yet been incremented
+   * (i.e. `lastIncrementAt === 0`). Call immediately after construction.
+   */
+  seedInitialScore(score: number): void {
+    if (score > 0 && this.lastIncrementAt === 0) {
+      this.score = score;
+      this.lastIncrementAt = Date.now();
+    }
   }
 
   get currentScore(): number {
@@ -75,17 +110,60 @@ export class SuspicionEngine {
 
   increment(points: number, reason?: string): void {
     if (this.locked) return;
-    this.score += points;
-    if (this.score >= this.config.suspicion.thresholds.lockdown) {
+
+    // Apply continuous exponential score decay before adding new points.
+    const now = Date.now();
+    const halfLife = this.config.suspicion.scoreDecayHalfLifeMs;
+    if (halfLife > 0 && this.lastIncrementAt > 0 && this.score > 0) {
+      const elapsed = now - this.lastIncrementAt;
+      this.score = this.score * Math.exp((-Math.LN2 * elapsed) / halfLife);
+    }
+    this.lastIncrementAt = now;
+
+    // Reduce impact when there is genuine user activation (user is at keyboard).
+    const nav = globalThis.navigator as Navigator & { userActivation?: { isActive?: boolean } };
+    const userIsActive = nav.userActivation?.isActive === true;
+    const effectivePoints = userIsActive ? points * 0.5 : points;
+    this.score += effectivePoints;
+
+    // Emit graduated threshold events (fire once per threshold crossing).
+    const th = this.config.suspicion.thresholds;
+    if (!this.firedThresholds.has('cautious') && this.score >= th.cautious) {
+      this.firedThresholds.add('cautious');
+      this.events.emit('suspicion-cautious', { score: this.score });
+    }
+    if (!this.firedThresholds.has('guarded') && this.score >= th.guarded) {
+      this.firedThresholds.add('guarded');
+      this.events.emit('suspicion-guarded', { score: this.score });
+    }
+    if (!this.firedThresholds.has('critical') && this.score >= th.critical) {
+      this.firedThresholds.add('critical');
+      this.events.emit('suspicion-critical', { score: this.score });
+    }
+
+    if (this.score >= th.lockdown) {
       void this.lockdown(reason ?? 'suspicion-threshold');
     }
+
+    this.onScoreUpdate?.(this.score, Date.now());
   }
 
   checkRateLimit(): { ok: boolean; callsPerSecond: number } {
     const now = Date.now();
-    this.callTimestamps = this.callTimestamps.filter((t) => now - t < RATE_WINDOW_MS);
-    this.callTimestamps.push(now);
-    const callsPerSecond = this.callTimestamps.length;
+
+    // O(1) write into circular buffer, O(RATE_BUFFER_SIZE) scan — no allocation.
+    this.tsBuf[this.tsHead] = now;
+    this.tsHead = (this.tsHead + 1) % RATE_BUFFER_SIZE;
+
+    // Count entries within the 1-second window.
+    let callsPerSecond = 0;
+    for (let i = 0; i < RATE_BUFFER_SIZE; i++) {
+      // eslint-disable-next-line security/detect-object-injection
+      const ts = this.tsBuf[i] ?? 0;
+      if (ts > 0 && now - ts < RATE_WINDOW_MS) {
+        callsPerSecond++;
+      }
+    }
 
     if (callsPerSecond > this.config.suspicion.rateLimit.callsPerSecond) {
       const excess = callsPerSecond - this.config.suspicion.rateLimit.callsPerSecond;
@@ -140,9 +218,12 @@ export class SuspicionEngine {
 
   reset(): void {
     this.score = 0;
-    this.callTimestamps = [];
+    this.tsBuf.fill(0);
+    this.tsHead = 0;
     this.locked = false;
     this.hiddenAt = 0;
+    this.lastIncrementAt = 0;
+    this.firedThresholds.clear();
   }
 
   destroy(): void {

@@ -365,10 +365,34 @@ export function renderPinPad(container: HTMLElement, config: PinPadConfig): () =
   draw();
   updateDots();
 
+  // Revoke canvas pixel-export APIs so injected scripts cannot screenshot
+  // the canvas and reconstruct the zone map from pixel data.
+  // This is best-effort — a sufficiently privileged extension or devtools
+  // session can still capture frame data, but removing the JS-callable APIs
+  // blocks the most common XSS-based canvas-exfiltration patterns.
+  Object.defineProperty(canvas, 'toDataURL', {
+    configurable: true,
+    value(): string {
+      return '';
+    },
+  });
+  Object.defineProperty(canvas, 'toBlob', {
+    configurable: true,
+    value(_callback: BlobCallback): void {
+      /* revoked */
+    },
+  });
+
   // Return a cleanup function for framework adapters (React useEffect, etc.).
   return (): void => {
     canvas.removeEventListener('click', onCanvasClick);
     canvas.removeEventListener('touchend', onCanvasTouch);
+    // Restore the original canvas APIs on cleanup so the element can be
+    // safely reused if the caller reattaches it.
+    // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+    delete (canvas as unknown as Record<string, unknown>)['toDataURL'];
+    // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+    delete (canvas as unknown as Record<string, unknown>)['toBlob'];
     container.innerHTML = '';
   };
 }

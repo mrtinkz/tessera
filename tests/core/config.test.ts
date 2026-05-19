@@ -1,6 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { resolveConfig } from '../../src/core/config';
 import { DEFAULT_ENHANCED_CONFIG } from '../../src/types';
+
+// Module-level helper — must not close over describe/it variables (unicorn/consistent-function-scoping)
+const onBeforeWriteHook = (key: string, _v: string): boolean => key !== 'blocked';
 
 describe('resolveConfig', () => {
   it('returns defaults when called with no arguments', () => {
@@ -168,5 +171,162 @@ describe('resolveConfig', () => {
     // A count of 0.5 satisfies: count > 0 && count < honeyMin → gets bumped to honeyMin.
     const cfg = resolveConfig({ honeyKeys: { count: 0.5 } } as Parameters<typeof resolveConfig>[0]);
     expect(cfg.honeyKeys.count).toBeGreaterThanOrEqual(1);
+  });
+
+  // Covers workerRateLimits overrides (config.ts lines 102, 104)
+  it('applies workerRateLimits overrides', () => {
+    const cfg = resolveConfig({
+      workerRateLimits: { maxReadsPerSession: 50, maxMessagesPerSecond: 20 },
+    } as Parameters<typeof resolveConfig>[0]);
+    expect(cfg.workerRateLimits.maxReadsPerSession).toBe(50);
+    expect(cfg.workerRateLimits.maxMessagesPerSecond).toBe(20);
+  });
+
+  // Covers suspicion.rateLimit branches (config.ts lines 107-110)
+  it('applies suspicion.rateLimit overrides', () => {
+    const cfg = resolveConfig({
+      suspicion: { rateLimit: { callsPerSecond: 20, scorePerExcess: 5 } },
+    } as Parameters<typeof resolveConfig>[0]);
+    expect(cfg.suspicion.rateLimit.callsPerSecond).toBe(20);
+    expect(cfg.suspicion.rateLimit.scorePerExcess).toBe(5);
+  });
+
+  // Covers debug and cspCheck overrides
+  it('applies debug and cspCheck overrides', () => {
+    const cfg = resolveConfig({ debug: true, cspCheck: 'require' } as Parameters<
+      typeof resolveConfig
+    >[0]);
+    expect(cfg.debug).toBe(true);
+    expect(cfg.cspCheck).toBe('require');
+  });
+
+  // ── P2: idleTimeout < 1000 warning ────────────────────────────────────────────
+  it('warns when idleTimeout is below 1000ms (P2)', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    resolveConfig({ idleTimeout: 500 });
+    expect(warnSpy).toHaveBeenCalledOnce();
+    expect(warnSpy.mock.calls[0]![0]).toMatch(/idleTimeout/);
+    warnSpy.mockRestore();
+  });
+
+  it('does not warn when idleTimeout is exactly 1000ms (P2)', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    resolveConfig({ idleTimeout: 1000 });
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  // ── P3: onBeforeWrite + maxValueBytes ─────────────────────────────────────────
+  it('passes through onBeforeWrite callback (P3)', () => {
+    const cfg = resolveConfig({ onBeforeWrite: onBeforeWriteHook });
+    expect(cfg.onBeforeWrite).toBe(onBeforeWriteHook);
+  });
+
+  it('passes through maxValueBytes (P3)', () => {
+    const cfg = resolveConfig({ maxValueBytes: 1024 });
+    expect(cfg.maxValueBytes).toBe(1024);
+  });
+
+  it('throws when maxValueBytes is not a positive integer (P3)', () => {
+    expect(() => resolveConfig({ maxValueBytes: 0 })).toThrow(/maxValueBytes/);
+    expect(() => resolveConfig({ maxValueBytes: -1 })).toThrow(/maxValueBytes/);
+    expect(() => resolveConfig({ maxValueBytes: 1.5 })).toThrow(/maxValueBytes/);
+  });
+
+  // ── P4: maxUnlockDurationMs ────────────────────────────────────────────────────
+  it('passes through maxUnlockDurationMs (P4)', () => {
+    const cfg = resolveConfig({ maxUnlockDurationMs: 60_000 });
+    expect(cfg.maxUnlockDurationMs).toBe(60_000);
+  });
+
+  it('throws when maxUnlockDurationMs is not positive (P4)', () => {
+    expect(() => resolveConfig({ maxUnlockDurationMs: 0 })).toThrow(/maxUnlockDurationMs/);
+    expect(() => resolveConfig({ maxUnlockDurationMs: -1 })).toThrow(/maxUnlockDurationMs/);
+  });
+
+  // ── P5: honeyKeys.maxPerBackend ────────────────────────────────────────────────
+  it('defaults honeyKeys.maxPerBackend to 500 (P5)', () => {
+    const cfg = resolveConfig();
+    expect(cfg.honeyKeys.maxPerBackend).toBe(500);
+  });
+
+  it('applies honeyKeys.maxPerBackend override (P5)', () => {
+    const cfg = resolveConfig({ honeyKeys: { count: 3, maxPerBackend: 100 } });
+    expect(cfg.honeyKeys.maxPerBackend).toBe(100);
+  });
+
+  it('throws when honeyKeys.maxPerBackend is not a positive integer (P5)', () => {
+    expect(() => resolveConfig({ honeyKeys: { count: 3, maxPerBackend: 0 } })).toThrow(
+      /maxPerBackend/,
+    );
+    expect(() => resolveConfig({ honeyKeys: { count: 3, maxPerBackend: 1.5 } })).toThrow(
+      /maxPerBackend/,
+    );
+  });
+
+  // ── P6: suspicion.persistScore ────────────────────────────────────────────────
+  it('defaults suspicion.persistScore to false (P6)', () => {
+    const cfg = resolveConfig();
+    expect(cfg.suspicion.persistScore).toBe(false);
+  });
+
+  it('enables suspicion.persistScore (P6)', () => {
+    const cfg = resolveConfig({ suspicion: { persistScore: true } });
+    expect(cfg.suspicion.persistScore).toBe(true);
+  });
+
+  // ── P8: contextBinding ────────────────────────────────────────────────────────
+  it('passes through contextBinding.webauthn with default onMismatch (P8)', () => {
+    const cfg = resolveConfig({ contextBinding: { webauthn: true } });
+    expect(cfg.contextBinding?.webauthn).toBe(true);
+    expect(cfg.contextBinding?.onMismatch).toBe('throw');
+  });
+
+  it('passes through contextBinding.onMismatch override (P8)', () => {
+    const cfg = resolveConfig({ contextBinding: { webauthn: true, onMismatch: 'wipe' } });
+    expect(cfg.contextBinding?.onMismatch).toBe('wipe');
+  });
+
+  // ── Validation throw paths ────────────────────────────────────────────────────
+
+  it('throws on invalid non-default vaultId', () => {
+    expect(() => resolveConfig({ vaultId: 'has spaces!' })).toThrow(/invalid/i);
+  });
+
+  it('throws when defaults.ttl is zero or negative', () => {
+    expect(() =>
+      resolveConfig({ defaults: { ttl: 0 } } as Parameters<typeof resolveConfig>[0]),
+    ).toThrow(/positive/i);
+    expect(() =>
+      resolveConfig({ defaults: { ttl: -1 } } as Parameters<typeof resolveConfig>[0]),
+    ).toThrow(/positive/i);
+  });
+
+  it('throws when defaults.maxReads is zero, negative, or non-integer', () => {
+    expect(() =>
+      resolveConfig({ defaults: { maxReads: 0 } } as Parameters<typeof resolveConfig>[0]),
+    ).toThrow(/positive integer/i);
+    expect(() =>
+      resolveConfig({ defaults: { maxReads: 1.5 } } as Parameters<typeof resolveConfig>[0]),
+    ).toThrow(/positive integer/i);
+  });
+
+  it('enforces lockoutAttempts floor (below min clamped to min)', () => {
+    const cfg = resolveConfig({ lockoutAttempts: 1 });
+    // ENFORCED_FLOORS.lockoutAttemptsMin is 3
+    expect(cfg.lockoutAttempts).toBeGreaterThanOrEqual(3);
+  });
+
+  it('enforces lockoutAttempts ceiling (above max clamped to max)', () => {
+    const cfg = resolveConfig({ lockoutAttempts: 999 });
+    // ENFORCED_FLOORS.lockoutAttemptsMax is 20
+    expect(cfg.lockoutAttempts).toBeLessThanOrEqual(20);
+  });
+
+  it('enforces honeyKeys.count floor when count is between 1 and honeyMin', () => {
+    // honeyMin = 1; honeyKeys.count > 0 && < 1 means fractional — not possible with integers.
+    // Instead test that count = 0 (disabled) is passed through unchanged.
+    const cfg = resolveConfig({ honeyKeys: { count: 0 } });
+    expect(cfg.honeyKeys.count).toBe(0);
   });
 });

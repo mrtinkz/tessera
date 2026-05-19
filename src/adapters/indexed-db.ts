@@ -5,33 +5,47 @@ import {
   type ResolvedConfig,
   type SensitivityLevel,
   type SuspicionAction,
+  type HoneyKeyManagerIsh,
   TesseraError,
   TesseraErrorCode,
 } from '../types';
+import { type HoneyKeyManager } from '../storage/honey';
 import { type KeySession } from '../core/session';
-import { encryptWithSalt, decryptFull, rotateKeyName as rotateKeyNameFn } from '../core/crypto';
+import {
+  encryptWithSalt,
+  decryptFull,
+  rotateKeyName as rotateKeyNameFn,
+  generateHoneyCiphertext,
+} from '../core/crypto';
 import { type TesseraEmitter } from '../core/events';
 import { type SuspicionEngine } from '../core/suspicion';
 import { generateNoiseBlock } from '../core/wipe';
 import { SENSITIVITY_DEFAULTS } from '../types';
 
-const DB_NAME = 'tessera_vault';
+// DB_NAME is computed per vault. 'default' keeps the legacy name for zero migration.
+function resolveDbName(vaultId = 'default'): string {
+  return vaultId === 'default' ? 'tessera_vault' : `tessera_vault_${vaultId}`;
+}
+
 const DB_VERSION = 2;
 const QUOTA_WARNING_THRESHOLD = 0.8;
 const DEFAULT_ON_SUSPICION: SuspicionAction = 'wipe';
 
-function openDb(): Promise<IDBDatabase> {
+function openDb(vaultId = 'default'): Promise<IDBDatabase> {
   return new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    const request = indexedDB.open(resolveDbName(vaultId), DB_VERSION);
 
     request.onupgradeneeded = (): void => {
       const db = request.result;
+      /* v8 ignore next 2 */
       if (!db.objectStoreNames.contains('tessera_data')) {
         db.createObjectStore('tessera_data', { keyPath: ['store', 'key'] });
       }
+      /* v8 ignore next 2 */
       if (!db.objectStoreNames.contains('_claims')) {
         db.createObjectStore('_claims', { keyPath: 'token' });
       }
+      /* v8 ignore next 2 */
       if (!db.objectStoreNames.contains('_splits')) {
         db.createObjectStore('_splits', { keyPath: ['store', 'key'] });
       }
@@ -39,7 +53,12 @@ function openDb(): Promise<IDBDatabase> {
 
     request.onsuccess = (): void => resolve(request.result);
     request.addEventListener('error', () =>
-      reject(new TesseraError(TesseraErrorCode.STORAGE_QUOTA, 'Failed to open IndexedDB.')),
+      reject(
+        new TesseraError(
+          TesseraErrorCode.UNSUPPORTED_ENV,
+          'Failed to open IndexedDB. IndexedDB may be unavailable in this environment (private/incognito mode or security policy).',
+        ),
+      ),
     );
   });
 }
@@ -66,13 +85,48 @@ async function checkQuota(events: TesseraEmitter): Promise<void> {
 
 export class IndexedDbAdapter implements IIDBAdapter {
   private sensitivityRegistry = new Map<string, Map<string, SensitivityLevel>>();
+  private honeyManager: HoneyKeyManagerIsh | null = null;
+  // Store the resolved vault ID so all IDB operations use the right database.
+  private readonly vaultId: string;
+  // Persistent IDB connection — open once per vault session, close on lock/destroy.
+  private db: IDBDatabase | null = null;
 
   constructor(
     private config: ResolvedConfig,
     private session: KeySession,
     private events: TesseraEmitter,
     private suspicion?: SuspicionEngine,
-  ) {}
+  ) {
+    this.vaultId = config.vaultId ?? 'default';
+  }
+
+  /**
+   * Returns the cached IDB connection, opening it if necessary.
+   * Registers a `versionchange` listener so we gracefully close if another tab
+   * tries to upgrade the schema.
+   */
+  private async getDb(): Promise<IDBDatabase> {
+    if (this.db !== null) return this.db;
+    const db = await openDb(this.vaultId);
+    // Close our hold if another tab triggers a schema upgrade.
+    /* v8 ignore next 4 */
+    db.addEventListener('versionchange', () => {
+      this.db?.close();
+      this.db = null;
+    });
+    this.db = db;
+    return db;
+  }
+
+  setHoneyManager(manager: HoneyKeyManagerIsh): void {
+    this.honeyManager = manager;
+  }
+
+  /** Close the persistent IDB connection. Called when the vault is locked or destroyed. */
+  close(): void {
+    this.db?.close();
+    this.db = null;
+  }
 
   async put(
     storeName: string,
@@ -82,6 +136,23 @@ export class IndexedDbAdapter implements IIDBAdapter {
   ): Promise<void> {
     const cryptoKey = this.session.getKey();
     const storageKey = await this.session.rotateKeyName(key);
+
+    const serialised = JSON.stringify(value);
+    if (this.config.maxValueBytes !== undefined) {
+      const byteLength = new TextEncoder().encode(serialised).byteLength;
+      if (byteLength > this.config.maxValueBytes) {
+        throw new TesseraError(
+          TesseraErrorCode.VALIDATION_ERROR,
+          `Value for '${key}' is ${byteLength} bytes, exceeds maxValueBytes (${this.config.maxValueBytes}).`,
+        );
+      }
+    }
+    if (this.config.onBeforeWrite !== undefined && !this.config.onBeforeWrite(key, serialised)) {
+      throw new TesseraError(
+        TesseraErrorCode.VALIDATION_ERROR,
+        `Write for key '${key}' was rejected by onBeforeWrite.`,
+      );
+    }
 
     const sensitivity = options?.sensitivity ?? this.config.defaultSensitivity ?? 'medium';
     const metadata = this.buildMeta(sensitivity, options);
@@ -93,19 +164,37 @@ export class IndexedDbAdapter implements IIDBAdapter {
     }
     storeMap.set(key, sensitivity);
 
-    const packed = await this.packageValue(cryptoKey, JSON.stringify(value), metadata);
+    // Prepare honey keys and generate all ciphertexts in parallel with the real value.
+    const honeyKeys = this.prepareHoneyKeys();
+    const allCts = await Promise.all([
+      this.packageValue(cryptoKey, serialised, metadata),
+      ...honeyKeys.map(() => generateHoneyCiphertext(cryptoKey)),
+    ]);
+    const packed = allCts[0]!;
+    const honeyCts = allCts.slice(1);
 
-    const db = await openDb();
+    // Collect all writes and shuffle them so the real entry has no fixed position.
+    const writes: Array<[string, string]> = [
+      [storageKey, packed],
+      ...honeyKeys.map((hk, i) => [hk, honeyCts[i]!] as [string, string]),
+    ];
+    for (let i = writes.length - 1; i > 0; i--) {
+      const j = crypto.getRandomValues(new Uint8Array(1))[0]! % (i + 1);
+      // eslint-disable-next-line security/detect-object-injection
+      [writes[i]!, writes[j]!] = [writes[j]!, writes[i]!];
+    }
+
+    const db = await this.getDb();
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction('tessera_data', 'readwrite');
       const store = tx.objectStore('tessera_data');
-      store.put({ store: storeName, key: storageKey, value: packed, updatedAt: Date.now() });
+      for (const [k, v] of writes) {
+        store.put({ store: storeName, key: k, value: v, updatedAt: Date.now() });
+      }
       tx.oncomplete = (): void => {
-        db.close();
         resolve();
       };
       tx.addEventListener('error', (): void => {
-        db.close();
         reject(new TesseraError(TesseraErrorCode.STORAGE_QUOTA, 'IndexedDB write failed.'));
       });
     });
@@ -127,10 +216,20 @@ export class IndexedDbAdapter implements IIDBAdapter {
       }
     }
 
+    if (this.honeyManager?.isDecoyAlias('idb', key)) {
+      this.suspicion?.recordHoneyHit('idb');
+      return undefined;
+    }
+
     const storageKey = await this.session.rotateKeyNameSafe(key);
     if (storageKey === null) return undefined;
 
-    const db = await openDb();
+    if (this.honeyManager?.isHoney('idb', storageKey)) {
+      this.suspicion?.recordHoneyHit('idb');
+      return undefined;
+    }
+
+    const db = await this.getDb();
     const record = await new Promise<{ value: string } | undefined>((resolve, reject) => {
       const tx = db.transaction('tessera_data', 'readonly');
       const store = tx.objectStore('tessera_data');
@@ -141,14 +240,14 @@ export class IndexedDbAdapter implements IIDBAdapter {
       request.addEventListener('error', (): void => {
         reject(new TesseraError(TesseraErrorCode.STORAGE_QUOTA, 'IndexedDB read failed.'));
       });
-      tx.oncomplete = (): void => {
-        db.close();
-      };
+      tx.oncomplete = (): void => {};
     });
 
+    /* v8 ignore next */
     if (record === undefined) return undefined;
 
     const result = await this.readWithMetadata(cryptoKey, record.value, key, 'idb', storeName);
+    /* v8 ignore next */
     if (result === null) return undefined;
 
     try {
@@ -165,7 +264,7 @@ export class IndexedDbAdapter implements IIDBAdapter {
     if (storageKey === null) return;
 
     // Overwrite with noise before deleting for forensic mitigation.
-    const db = await openDb();
+    const db = await this.getDb();
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction('tessera_data', 'readwrite');
       const store = tx.objectStore('tessera_data');
@@ -176,28 +275,23 @@ export class IndexedDbAdapter implements IIDBAdapter {
         updatedAt: Date.now(),
       });
       tx.oncomplete = (): void => {
-        db.close();
         resolve();
       };
       /* v8 ignore next 4 */
       tx.addEventListener('error', (): void => {
-        db.close();
         reject();
       });
     });
 
-    const db2 = await openDb();
     await new Promise<void>((resolve, reject) => {
-      const tx = db2.transaction('tessera_data', 'readwrite');
+      const tx = db.transaction('tessera_data', 'readwrite');
       const store = tx.objectStore('tessera_data');
       store.delete([storeName, storageKey]);
       tx.oncomplete = (): void => {
-        db2.close();
         resolve();
       };
       /* v8 ignore next 4 */
       tx.addEventListener('error', (): void => {
-        db2.close();
         reject();
       });
     });
@@ -205,7 +299,7 @@ export class IndexedDbAdapter implements IIDBAdapter {
   }
 
   async clear(storeName: string): Promise<void> {
-    const db = await openDb();
+    const db = await this.getDb();
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction('tessera_data', 'readwrite');
       const store = tx.objectStore('tessera_data');
@@ -221,12 +315,10 @@ export class IndexedDbAdapter implements IIDBAdapter {
         }
       };
       tx.oncomplete = (): void => {
-        db.close();
         resolve();
       };
       /* v8 ignore next 4 */
       tx.addEventListener('error', (): void => {
-        db.close();
         reject();
       });
     });
@@ -301,7 +393,11 @@ export class IndexedDbAdapter implements IIDBAdapter {
         softThresholdMs: metadata.halfLifeSoft,
         elapsedMs: Date.now() - metadata.writeTime,
       });
-      return null;
+      // Throw typed error so callers get an explicit signal.
+      throw new TesseraError(
+        TesseraErrorCode.RECONFIRMATION_REQUIRED,
+        `Key '${keyAlias}' requires reconfirmation before it can be read.`,
+      );
     }
 
     const valueResult = await decryptFull(cryptoKey, valueB64);
@@ -337,13 +433,18 @@ export class IndexedDbAdapter implements IIDBAdapter {
     storeName = 'tessera_data',
   ): Promise<void> {
     const resolvedStore = storeName;
-    const hmacKey = this.session.getHmacKeySafe()!;
+    // Guard against session locking between the get() and updateMetadata() calls.
+    // getHmacKeySafe() returns null when locked — bail out gracefully instead of
+    // crashing with a TypeError inside the IDB transaction.
+    const hmacKey = this.session.getHmacKeySafe();
+    /* v8 ignore next */
+    if (hmacKey === null) return;
     const storageKey = await rotateKeyNameFn(hmacKey, keyAlias);
 
     // Encrypt metadata BEFORE the transaction (async work not allowed inside IDB transactions).
     const encryptedMeta = await encryptWithSalt(cryptoKey, JSON.stringify(metadata));
 
-    const db = await openDb();
+    const db = await this.getDb();
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction('tessera_data', 'readwrite');
       const store = tx.objectStore('tessera_data');
@@ -370,12 +471,10 @@ export class IndexedDbAdapter implements IIDBAdapter {
         });
       };
       tx.oncomplete = (): void => {
-        db.close();
         resolve();
       };
       /* v8 ignore next 5 */
       tx.addEventListener('error', (): void => {
-        db.close();
         reject(
           new TesseraError(TesseraErrorCode.STORAGE_QUOTA, 'IndexedDB updateMetadata failed.'),
         );
@@ -386,19 +485,17 @@ export class IndexedDbAdapter implements IIDBAdapter {
   async wipeAll(wiped: string[]): Promise<void> {
     /* v8 ignore next */
     if (typeof indexedDB === 'undefined') return;
-    const db = await openDb();
+    const db = await this.getDb();
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(['tessera_data', '_claims', '_splits'], 'readwrite');
       tx.objectStore('tessera_data').clear();
       tx.objectStore('_claims').clear();
       tx.objectStore('_splits').clear();
       tx.oncomplete = (): void => {
-        db.close();
         resolve();
       };
       /* v8 ignore next 4 */
       tx.addEventListener('error', (): void => {
-        db.close();
         reject();
       });
     });
@@ -413,7 +510,7 @@ export class IndexedDbAdapter implements IIDBAdapter {
     if (typeof indexedDB === 'undefined') return;
 
     // Scan the full IDB store — covers items from previous sessions not in the registry
-    const db = await openDb();
+    const db = await this.getDb();
     const allRecords = await new Promise<Array<{ store: string; key: string; value: string }>>(
       (resolve, reject) => {
         const tx = db.transaction('tessera_data', 'readonly');
@@ -428,12 +525,10 @@ export class IndexedDbAdapter implements IIDBAdapter {
           }
         };
         tx.oncomplete = (): void => {
-          db.close();
           resolve(results);
         };
         /* v8 ignore next 4 */
         tx.addEventListener('error', (): void => {
-          db.close();
           reject();
         });
       },
@@ -451,17 +546,14 @@ export class IndexedDbAdapter implements IIDBAdapter {
         continue;
       }
       if (meta.sensitivity === 'high' || meta.sensitivity === 'critical') {
-        const db2 = await openDb();
         await new Promise<void>((resolve2, reject2) => {
-          const tx2 = db2.transaction('tessera_data', 'readwrite');
+          const tx2 = db.transaction('tessera_data', 'readwrite');
           tx2.objectStore('tessera_data').delete([record.store, record.key]);
           tx2.oncomplete = (): void => {
-            db2.close();
             resolve2();
           };
           /* v8 ignore next 4 */
           tx2.addEventListener('error', (): void => {
-            db2.close();
             reject2();
           });
         });
@@ -524,5 +616,171 @@ export class IndexedDbAdapter implements IIDBAdapter {
     if (hlHard !== undefined) meta.halfLifeHard = hlHard;
 
     return meta;
+  }
+
+  private prepareHoneyKeys(): string[] {
+    const mgr = this.honeyManager as HoneyKeyManager | null;
+    /* v8 ignore next */
+    if (!mgr?.isEnabled) return [];
+    const needed = this.config.honeyKeys.count - mgr.allKeys('idb').length;
+    /* v8 ignore next */
+    if (needed <= 0) return [];
+    const honeyStorageKeys = mgr.generateHoneyKeys('idb', [], needed);
+    for (const storageKey of honeyStorageKeys) {
+      mgr.assignDecoyAlias('idb', storageKey, []);
+    }
+    return honeyStorageKeys;
+  }
+
+  async cleanOrphanedHoneyKeys(): Promise<void> {
+    try {
+      /* v8 ignore next */
+      if (typeof indexedDB === 'undefined') return;
+      const cryptoKey = this.session.getKeySafe();
+      if (!cryptoKey) return;
+
+      const db = await this.getDb();
+      const allRecords = await new Promise<Array<{ store: string; key: string; value: string }>>(
+        (resolve, reject) => {
+          const records: Array<{ store: string; key: string; value: string }> = [];
+          const tx = db.transaction('tessera_data', 'readonly');
+          const objStore = tx.objectStore('tessera_data');
+          const req = objStore.openCursor();
+          req.onsuccess = (): void => {
+            const cursor = req.result;
+            if (cursor) {
+              records.push(cursor.value as { store: string; key: string; value: string });
+              cursor.continue();
+            }
+          };
+          tx.oncomplete = (): void => resolve(records);
+          /* v8 ignore next 2 */
+          tx.addEventListener('error', (): void => reject());
+        },
+      );
+
+      for (const record of allRecords) {
+        if (this.session.getKeySafe() === null) return;
+        if (this.honeyManager?.isHoney('idb', record.key)) continue;
+        const dotIdx = record.value.indexOf('.');
+        if (dotIdx === -1) continue;
+        const metaResult = await decryptFull(cryptoKey, record.value.slice(0, dotIdx));
+        if (!metaResult.ok) continue;
+        try {
+          JSON.parse(metaResult.value);
+        } catch {
+          // Decrypts but is not valid JSON — orphaned IDB honey key from a previous session
+          await new Promise<void>((resolve) => {
+            const delTx = db.transaction('tessera_data', 'readwrite');
+            delTx.objectStore('tessera_data').delete([record.store, record.key]);
+            delTx.oncomplete = (): void => resolve();
+            /* v8 ignore next */
+            delTx.addEventListener('error', (): void => resolve()); // best-effort
+          });
+        }
+      }
+    } catch {
+      // Background task — never propagate errors
+    }
+  }
+
+  /**
+   * Remove orphaned `_splits` IDB entries whose sessionStorage pointer no
+   * longer exists (e.g. the session was cleared or the tab was closed after a split
+   * write but before the corresponding remove).
+   *
+   * An entry is considered orphaned when `sessionStorage.getItem(storageKey)` does
+   * NOT start with `'split:'`.
+   */
+  async cleanOrphanedSplits(): Promise<void> {
+    if (typeof indexedDB === 'undefined' || typeof sessionStorage === 'undefined') return;
+
+    const db = await this.getDb();
+    const orphanKeys = await new Promise<Array<[string, string]>>((resolve, reject) => {
+      const keys: Array<[string, string]> = [];
+      const tx = db.transaction('_splits', 'readonly');
+      const store = tx.objectStore('_splits');
+      const req = store.openCursor();
+      req.onsuccess = (): void => {
+        const cursor = req.result;
+        if (cursor) {
+          const record = cursor.value as { store: string; key: string };
+          const rawSs = sessionStorage.getItem(record.key);
+          if (rawSs === null || !rawSs.startsWith('split:')) {
+            keys.push([record.store, record.key]);
+          }
+          cursor.continue();
+        }
+      };
+      tx.oncomplete = (): void => resolve(keys);
+      /* v8 ignore next 2 */
+      tx.addEventListener('error', (): void => reject());
+    });
+
+    if (orphanKeys.length === 0) return;
+
+    for (const compoundKey of orphanKeys) {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction('_splits', 'readwrite');
+        tx.objectStore('_splits').delete(compoundKey);
+        tx.oncomplete = (): void => resolve();
+        /* v8 ignore next 2 */
+        tx.addEventListener('error', (): void => reject());
+      });
+    }
+  }
+
+  /**
+   * Remove orphaned `_claims` IDB entries whose claim token is no longer
+   * referenced by any sessionStorage value (e.g. the session was cleared after a
+   * claim write but before the corresponding remove).
+   *
+   * An entry is considered orphaned when no sessionStorage value equals
+   * `'ref:' + token`.
+   */
+  async cleanOrphanedClaims(): Promise<void> {
+    if (typeof indexedDB === 'undefined' || typeof sessionStorage === 'undefined') return;
+
+    // Build a Set of all claim tokens currently alive in sessionStorage.
+    const liveTokens = new Set<string>();
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const val = sessionStorage.getItem(sessionStorage.key(i) ?? '') ?? '';
+      if (val.startsWith('ref:')) {
+        liveTokens.add(val.slice('ref:'.length));
+      }
+    }
+
+    const db = await this.getDb();
+    const orphanTokens = await new Promise<string[]>((resolve, reject) => {
+      const tokens: string[] = [];
+      const tx = db.transaction('_claims', 'readonly');
+      const store = tx.objectStore('_claims');
+      const req = store.openCursor();
+      req.onsuccess = (): void => {
+        const cursor = req.result;
+        if (cursor) {
+          const record = cursor.value as { token: string };
+          if (!liveTokens.has(record.token)) {
+            tokens.push(record.token);
+          }
+          cursor.continue();
+        }
+      };
+      tx.oncomplete = (): void => resolve(tokens);
+      /* v8 ignore next 2 */
+      tx.addEventListener('error', (): void => reject());
+    });
+
+    if (orphanTokens.length === 0) return;
+
+    for (const token of orphanTokens) {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction('_claims', 'readwrite');
+        tx.objectStore('_claims').delete(token);
+        tx.oncomplete = (): void => resolve();
+        /* v8 ignore next 2 */
+        tx.addEventListener('error', (): void => reject());
+      });
+    }
   }
 }

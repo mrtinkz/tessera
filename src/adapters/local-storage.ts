@@ -7,6 +7,8 @@ import {
   type SensitivityLevel,
   type SuspicionAction,
   type HoneyKeyManagerIsh,
+  TesseraError,
+  TesseraErrorCode,
 } from '../types';
 import { type KeySession } from '../core/session';
 import { encryptWithSalt, decryptFull, generateHoneyCiphertext } from '../core/crypto';
@@ -83,16 +85,51 @@ export class LocalStorageAdapter implements IStorageAdapter {
     const cryptoKey = this.session.getKey();
     const storageKey = await this.session.rotateKeyName(key);
 
+    if (this.config.maxValueBytes !== undefined) {
+      const byteLength = new TextEncoder().encode(value).byteLength;
+      if (byteLength > this.config.maxValueBytes) {
+        throw new TesseraError(
+          TesseraErrorCode.VALIDATION_ERROR,
+          `Value for '${key}' is ${byteLength} bytes, exceeds maxValueBytes (${this.config.maxValueBytes}).`,
+        );
+      }
+    }
+    if (this.config.onBeforeWrite !== undefined && !this.config.onBeforeWrite(key, value)) {
+      throw new TesseraError(
+        TesseraErrorCode.VALIDATION_ERROR,
+        `Write for key '${key}' was rejected by onBeforeWrite.`,
+      );
+    }
+
     const sensitivity = options?.sensitivity ?? this.config.defaultSensitivity ?? 'medium';
     const metadata = this.buildMeta(sensitivity, options);
 
-    const packed = await this.packageValue(cryptoKey, value, metadata);
-    this.rawSetItem(storageKey, packed);
+    // Prepare honey keys and generate all ciphertexts in parallel with the real key.
+    const honeyKeys = this.prepareHoneyKeys('local');
+    const allCts = await Promise.all([
+      this.packageValue(cryptoKey, value, metadata),
+      ...honeyKeys.map(() => generateHoneyCiphertext(cryptoKey)),
+    ]);
+    const packed = allCts[0]!;
+    const honeyCts = allCts.slice(1);
+
+    // Write real key and honey keys in random order — no fixed creation pattern.
+    const writes: Array<[string, string]> = [
+      [storageKey, packed],
+      ...honeyKeys.map((hk, i) => [hk, honeyCts[i]!] as [string, string]),
+    ];
+    for (let i = writes.length - 1; i > 0; i--) {
+      const j = crypto.getRandomValues(new Uint8Array(1))[0]! % (i + 1);
+      // eslint-disable-next-line security/detect-object-injection
+      [writes[i]!, writes[j]!] = [writes[j]!, writes[i]!];
+    }
+    for (const [k, v] of writes) {
+      this.rawSetItem(k, v);
+    }
+
     this.keyRegistry.add(key);
     this.sensitivityRegistry.set(key, sensitivity);
-
     this.session.touch();
-    this.scheduleHoneyKeys('local');
   }
 
   async removeItem(key: string): Promise<void> {
@@ -405,7 +442,12 @@ export class LocalStorageAdapter implements IStorageAdapter {
         softThresholdMs: metadata.halfLifeSoft,
         elapsedMs: Date.now() - metadata.writeTime,
       });
-      return null;
+      // Throw typed error so callers get an explicit signal rather than
+      // ambiguous null. The event above fires first for observability.
+      throw new TesseraError(
+        TesseraErrorCode.RECONFIRMATION_REQUIRED,
+        `Key '${keyAlias}' requires reconfirmation before it can be read.`,
+      );
     }
 
     const valueResult = await decryptFull(cryptoKey, valueB64);
@@ -455,29 +497,17 @@ export class LocalStorageAdapter implements IStorageAdapter {
     this.rawSetItem(storageKey, `${encryptedMeta}.${valueB64}`);
   }
 
-  private scheduleHoneyKeys(backend: string): void {
+  private prepareHoneyKeys(backend: string): string[] {
     const mgr = this.honeyManager as HoneyKeyManager | null;
-    if (!mgr?.isEnabled) return;
+    if (!mgr?.isEnabled) return [];
     const needed = this.config.honeyKeys.count - mgr.allKeys(backend).length;
-    if (needed <= 0) return;
+    if (needed <= 0) return [];
     const existingAliases = [...this.keyRegistry];
     const honeyStorageKeys = mgr.generateHoneyKeys(backend, existingAliases, needed);
     for (const storageKey of honeyStorageKeys) {
       mgr.assignDecoyAlias(backend, storageKey, existingAliases);
-      const delay = 50 + Math.floor(Math.random() * 1950);
-      setTimeout(() => {
-        void this.writeHoneyKey(storageKey);
-      }, delay);
     }
-  }
-
-  private async writeHoneyKey(storageKey: string): Promise<void> {
-    const cryptoKey = this.session.getKeySafe();
-    if (!cryptoKey) return;
-    const ct = await generateHoneyCiphertext(cryptoKey);
-    // Don't write if wipeAll cleared the registry (e.g. lockdown fired during crypto)
-    if (!this.honeyManager?.isHoney('local', storageKey)) return;
-    this.rawSetItem(storageKey, ct);
+    return honeyStorageKeys;
   }
 
   private async applyOnSuspicion(

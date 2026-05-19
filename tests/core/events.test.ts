@@ -96,4 +96,29 @@ describe('TesseraEmitter', () => {
     // Second off should be a no-op
     expect(() => emitter.off('vault-locked', handler)).not.toThrow();
   });
+
+  it('off(handler) leaves the set intact when other handlers remain (set.size > 0 branch)', () => {
+    const emitter = new TesseraEmitter();
+    const h1 = vi.fn();
+    const h2 = vi.fn();
+    emitter.on('vault-locked', h1);
+    emitter.on('vault-locked', h2);
+    // Remove h1 — h2 is still registered; set must NOT be deleted.
+    emitter.off('vault-locked', h1);
+    emitter.emit('vault-locked', { reason: 'x' });
+    expect(h1).not.toHaveBeenCalled();
+    expect(h2).toHaveBeenCalledOnce();
+  });
+
+  it('silently drops registrations beyond MAX_HANDLERS_PER_EVENT (32)', () => {
+    const emitter = new TesseraEmitter();
+    const handlers = Array.from({ length: 34 }, () => vi.fn());
+    for (const h of handlers) {
+      emitter.on('vault-locked', h);
+    }
+    emitter.emit('vault-locked', { reason: 'x' });
+    // First 32 are called; the remaining 2 were silently dropped.
+    const calledCount = handlers.filter((h) => h.mock.calls.length > 0).length;
+    expect(calledCount).toBe(32);
+  });
 });

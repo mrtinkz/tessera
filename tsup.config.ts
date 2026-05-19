@@ -52,4 +52,12 @@ export default defineConfig([
     external: ['@angular/core'],
     platform: 'browser',
   },
+  {
+    // P-20: Standalone pin-pad sub-path — consumers who only need the PIN UI
+    // can import '@mrtinkz/tessera/pin-pad' without bundling the full vault.
+    entry: { 'pin-pad/index': 'src/ui/pin-pad.ts' },
+    format: ['esm', 'cjs'],
+    dts: true,
+    platform: 'browser',
+  },
 ]);

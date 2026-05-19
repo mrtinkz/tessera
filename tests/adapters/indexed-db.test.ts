@@ -6,6 +6,7 @@ import { deriveKey, deriveHmacKey, getSalt, encryptWithSalt } from '../../src/co
 import { resolveConfig } from '../../src/core/config';
 import { TesseraEmitter } from '../../src/core/events';
 import { SuspicionEngine } from '../../src/core/suspicion';
+import { HoneyKeyManager } from '../../src/storage/honey';
 
 // Helper to directly overwrite a record's value in the IDB tessera_data store
 async function overwriteIdbValue(
@@ -172,11 +173,13 @@ describe('IndexedDbAdapter', () => {
   });
 
   // halfLife soft
-  it('should return undefined when halfLife.soft has elapsed and no reconfirm key', async () => {
+  it('should throw RECONFIRMATION_REQUIRED when halfLife.soft has elapsed and no reconfirm key', async () => {
     const adapter = new IndexedDbAdapter(resolveConfig(), session, new TesseraEmitter());
     await adapter.put('idb-hl-s', 'hl-soft', 'v', { halfLife: { soft: 1 } });
     await new Promise((r) => setTimeout(r, 10));
-    expect(await adapter.get('idb-hl-s', 'hl-soft')).toBeUndefined();
+    await expect(adapter.get('idb-hl-s', 'hl-soft')).rejects.toMatchObject({
+      code: 'RECONFIRMATION_REQUIRED',
+    });
   });
 
   it('should emit reconfirmation-required on soft half-life expiry', async () => {
@@ -186,7 +189,12 @@ describe('IndexedDbAdapter', () => {
     events.on('reconfirmation-required', handler);
     await adapter.put('idb-hl-ev', 'hl-soft-ev', 'v', { halfLife: { soft: 1 } });
     await new Promise((r) => setTimeout(r, 10));
-    await adapter.get('idb-hl-ev', 'hl-soft-ev');
+    // get now throws after emitting the event
+    try {
+      await adapter.get('idb-hl-ev', 'hl-soft-ev');
+    } catch {
+      /* expected RECONFIRMATION_REQUIRED */
+    }
     expect(handler).toHaveBeenCalled();
   });
 
@@ -516,5 +524,271 @@ describe('IndexedDbAdapter', () => {
     } else {
       expect(true).toBe(true);
     }
+  });
+
+  // Honey keys: put() writes honeyKeys.count extra entries in the same store
+  it('should write honey entries alongside the real entry on put()', async () => {
+    const config = resolveConfig({ debug: true, honeyKeys: { count: 2 } });
+    const adapter = new IndexedDbAdapter(config, session, new TesseraEmitter());
+    const honeyManager = new HoneyKeyManager(config);
+    adapter.setHoneyManager(honeyManager);
+
+    await adapter.put('honey-store', 'real-key', 'real-value');
+
+    const honeyStorageKeys = honeyManager.allKeys('idb');
+    expect(honeyStorageKeys.length).toBe(2);
+
+    // Each honey entry must exist in IDB under the same store name
+    for (const hk of honeyStorageKeys) {
+      const raw = await new Promise<unknown>((resolve) => {
+        const req = indexedDB.open('tessera_vault', 2);
+        req.onsuccess = () => {
+          const db = req.result;
+          const tx = db.transaction('tessera_data', 'readonly');
+          const s = tx.objectStore('tessera_data');
+          const getReq = s.get(['honey-store', hk]);
+          getReq.onsuccess = () => {
+            db.close();
+            resolve(getReq.result);
+          };
+          tx.addEventListener('error', () => {
+            db.close();
+            resolve();
+          });
+        };
+      });
+      expect(raw).not.toBeUndefined();
+    }
+
+    // Real key is still readable
+    expect(await adapter.get('honey-store', 'real-key')).toBe('real-value');
+  });
+
+  // cleanOrphanedHoneyKeys: wipes IDB honey entries from a previous session
+  it('cleanOrphanedHoneyKeys wipes orphaned IDB honey entries from a prior session', async () => {
+    const config = resolveConfig({ debug: true, honeyKeys: { count: 2 } });
+
+    // Session 1: write a real key + honey entries
+    const session1 = new KeySession();
+    const salt = await getSalt();
+    const key1 = await deriveKey('246813', salt);
+    const hmac1 = await deriveHmacKey('246813', salt);
+    session1.setKey(key1, 900_000);
+    session1.setHmacKey(hmac1);
+
+    const adapter1 = new IndexedDbAdapter(config, session1, new TesseraEmitter());
+    const honeyMgr1 = new HoneyKeyManager(config);
+    adapter1.setHoneyManager(honeyMgr1);
+    await adapter1.put('orphan-store', 'real', 'value');
+    const honeyKeys1 = honeyMgr1.allKeys('idb');
+    expect(honeyKeys1.length).toBe(2);
+    session1.reset();
+
+    // Session 2: new session with same key, empty honey manager
+    const session2 = new KeySession();
+    session2.setKey(await deriveKey('246813', salt), 900_000);
+    session2.setHmacKey(await deriveHmacKey('246813', salt));
+
+    const adapter2 = new IndexedDbAdapter(config, session2, new TesseraEmitter());
+    const honeyMgr2 = new HoneyKeyManager(config);
+    adapter2.setHoneyManager(honeyMgr2);
+
+    await adapter2.cleanOrphanedHoneyKeys();
+
+    // Orphaned honey entries must be gone
+    for (const hk of honeyKeys1) {
+      const raw = await new Promise<unknown>((resolve) => {
+        const req = indexedDB.open('tessera_vault', 2);
+        req.onsuccess = () => {
+          const db = req.result;
+          const tx = db.transaction('tessera_data', 'readonly');
+          const s = tx.objectStore('tessera_data');
+          const getReq = s.get(['orphan-store', hk]);
+          getReq.onsuccess = () => {
+            db.close();
+            resolve(getReq.result);
+          };
+          tx.addEventListener('error', () => {
+            db.close();
+            resolve();
+          });
+        };
+      });
+      expect(raw).toBeUndefined();
+    }
+
+    // Real entry survives
+    expect(await adapter2.get('orphan-store', 'real')).toBe('value');
+    session2.reset();
+  });
+
+  // get() honey hit: isDecoyAlias — accessing a honey key via its decoy developer alias
+  it('get() records honey hit when called with a decoy alias on idb', async () => {
+    const config = resolveConfig({ debug: true, honeyKeys: { count: 1 } });
+    const { SuspicionEngine } = await import('../../src/core/suspicion');
+    const events = new TesseraEmitter();
+    const suspicion = new SuspicionEngine(config, events);
+    const adapter = new IndexedDbAdapter(config, session, events, suspicion);
+    const honeyManager = new HoneyKeyManager(config);
+    adapter.setHoneyManager(honeyManager);
+
+    await adapter.put('decoy-store', 'real-key', 'real-value');
+    const decoyAliases = honeyManager.allDecoyAliases('idb');
+    expect(decoyAliases.length).toBeGreaterThan(0);
+
+    const result = await adapter.get('decoy-store', decoyAliases[0]!);
+    expect(result).toBeUndefined();
+    expect(suspicion.score).toBeGreaterThan(0);
+    suspicion.destroy();
+  });
+
+  // cleanOrphanedSplits: removes _splits IDB entries whose sessionStorage pointer is gone
+  it('cleanOrphanedSplits removes orphaned entries and preserves live ones', async () => {
+    const adapter = new IndexedDbAdapter(resolveConfig(), session, new TesseraEmitter());
+
+    // Seed _splits directly via native IDB API
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('tessera_vault', 2);
+      req.onsuccess = () => {
+        const db = req.result;
+        const tx = db.transaction('_splits', 'readwrite');
+        const s = tx.objectStore('_splits');
+        s.put({ store: 'sp-store', key: 't_orphan_split', value: 'orphan-data' });
+        s.put({ store: 'sp-store', key: 't_live_split', value: 'live-data' });
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.addEventListener('error', () => {
+          db.close();
+          reject(tx.error);
+        });
+      };
+      req.addEventListener('error', () => reject(req.error));
+    });
+
+    // Only the live key has a valid split pointer in sessionStorage
+    sessionStorage.setItem('t_live_split', 'split:somebase64data');
+
+    await adapter.cleanOrphanedSplits();
+
+    // Verify orphan was deleted and live entry survives
+    const remaining = await new Promise<string[]>((resolve) => {
+      const req = indexedDB.open('tessera_vault', 2);
+      req.onsuccess = () => {
+        const db = req.result;
+        const keys: string[] = [];
+        const tx = db.transaction('_splits', 'readonly');
+        const s = tx.objectStore('_splits');
+        s.openCursor().onsuccess = (e) => {
+          const cursor = (e.target as IDBRequest<IDBCursorWithValue | null>).result;
+          if (cursor) {
+            keys.push((cursor.value as { key: string }).key);
+            cursor.continue();
+          }
+        };
+        tx.oncomplete = () => {
+          db.close();
+          resolve(keys);
+        };
+      };
+    });
+
+    expect(remaining).not.toContain('t_orphan_split');
+    expect(remaining).toContain('t_live_split');
+    sessionStorage.clear();
+  });
+
+  // cleanOrphanedClaims: removes _claims IDB entries whose ref token is no longer in sessionStorage
+  it('cleanOrphanedClaims removes orphaned claims and preserves live ones', async () => {
+    const adapter = new IndexedDbAdapter(resolveConfig(), session, new TesseraEmitter());
+
+    // Seed _claims directly via native IDB API
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('tessera_vault', 2);
+      req.onsuccess = () => {
+        const db = req.result;
+        const tx = db.transaction('_claims', 'readwrite');
+        const s = tx.objectStore('_claims');
+        s.put({ token: 'orphan-token-abc', value: 'orphan-encrypted' });
+        s.put({ token: 'live-token-xyz', value: 'live-encrypted' });
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.addEventListener('error', () => {
+          db.close();
+          reject(tx.error);
+        });
+      };
+      req.addEventListener('error', () => reject(req.error));
+    });
+
+    // Only the live token is referenced in sessionStorage
+    sessionStorage.setItem('some-claim-key', 'ref:live-token-xyz');
+
+    await adapter.cleanOrphanedClaims();
+
+    // Verify orphan was deleted and live claim survives
+    const remaining = await new Promise<string[]>((resolve) => {
+      const req = indexedDB.open('tessera_vault', 2);
+      req.onsuccess = () => {
+        const db = req.result;
+        const tokens: string[] = [];
+        const tx = db.transaction('_claims', 'readonly');
+        const s = tx.objectStore('_claims');
+        s.openCursor().onsuccess = (e) => {
+          const cursor = (e.target as IDBRequest<IDBCursorWithValue | null>).result;
+          if (cursor) {
+            tokens.push((cursor.value as { token: string }).token);
+            cursor.continue();
+          }
+        };
+        tx.oncomplete = () => {
+          db.close();
+          resolve(tokens);
+        };
+      };
+    });
+
+    expect(remaining).not.toContain('orphan-token-abc');
+    expect(remaining).toContain('live-token-xyz');
+    sessionStorage.clear();
+  });
+
+  // ── honey key detection branches ──────────────────────────────────────────────
+
+  it('get() returns undefined when developer key is a honey decoy alias (isDecoyAlias)', async () => {
+    const config = resolveConfig({});
+    const events = new TesseraEmitter();
+    const suspicion = new SuspicionEngine(config, events);
+    const adapter = new IndexedDbAdapter(config, session, events, suspicion);
+    const fakeMgr = {
+      add: () => {},
+      remove: () => {},
+      isHoney: () => false,
+      isDecoyAlias: () => true, // every developer key is a decoy alias
+      allDecoyAliases: () => [] as string[],
+    };
+    adapter.setHoneyManager(fakeMgr);
+    const result = await adapter.get('tessera_data', 'any-key');
+    expect(result).toBeUndefined();
+  });
+
+  it('get() returns undefined when rotated key matches a honey key (isHoney)', async () => {
+    const config = resolveConfig({});
+    const events = new TesseraEmitter();
+    const suspicion = new SuspicionEngine(config, events);
+    const adapter = new IndexedDbAdapter(config, session, events, suspicion);
+    const fakeMgr = {
+      add: () => {},
+      remove: () => {},
+      isHoney: () => true, // every rotated key is a honey key
+      isDecoyAlias: () => false,
+      allDecoyAliases: () => [] as string[],
+    };
+    adapter.setHoneyManager(fakeMgr);
+    const result = await adapter.get('tessera_data', 'any-key');
+    expect(result).toBeUndefined();
   });
 });

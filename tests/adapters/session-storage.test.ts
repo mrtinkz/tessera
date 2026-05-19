@@ -137,11 +137,13 @@ describe('SessionStorageAdapter', () => {
   });
 
   // halfLife soft
-  it('should return null when halfLife.soft has elapsed and no reconfirm key', async () => {
+  it('should throw RECONFIRMATION_REQUIRED when halfLife.soft has elapsed and no reconfirm key', async () => {
     const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
     await adapter.setItem('hl-soft', 'v', { halfLife: { soft: 1 } });
     await new Promise((r) => setTimeout(r, 10));
-    expect(await adapter.getItem('hl-soft')).toBeNull();
+    await expect(adapter.getItem('hl-soft')).rejects.toMatchObject({
+      code: 'RECONFIRMATION_REQUIRED',
+    });
   });
 
   it('should emit reconfirmation-required on soft half-life expiry', async () => {
@@ -151,7 +153,12 @@ describe('SessionStorageAdapter', () => {
     events.on('reconfirmation-required', handler);
     await adapter.setItem('hl-soft-ev', 'v', { halfLife: { soft: 1 } });
     await new Promise((r) => setTimeout(r, 10));
-    await adapter.getItem('hl-soft-ev');
+    // getItem now throws after emitting the event
+    try {
+      await adapter.getItem('hl-soft-ev');
+    } catch {
+      /* expected RECONFIRMATION_REQUIRED */
+    }
     expect(handler).toHaveBeenCalled();
   });
 
@@ -409,12 +416,8 @@ describe('SessionStorageAdapter', () => {
     const adapter = new SessionStorageAdapter(config, session, new TesseraEmitter());
     adapter.setHoneyManager(mgr);
 
-    vi.useFakeTimers();
     await adapter.setItem('low-key', 'lo', { sensitivity: 'low' });
     await adapter.setItem('high-key', 'hi', { sensitivity: 'high' });
-    vi.runAllTimers();
-    vi.useRealTimers();
-    await new Promise((r) => setTimeout(r, 100));
     expect(mgr.allKeys('session').length).toBe(2);
 
     const tKeysBefore = Object.keys(sessionStorage).filter((k) => k.startsWith('t_'));
@@ -440,11 +443,7 @@ describe('SessionStorageAdapter', () => {
     const mgr1 = new HoneyKeyManager(config);
     const adapter1 = new SessionStorageAdapter(config, session, new TesseraEmitter());
     adapter1.setHoneyManager(mgr1);
-    vi.useFakeTimers();
     await adapter1.setItem('persist', 'still-here', { sensitivity: 'low' });
-    vi.advanceTimersByTime(2000);
-    vi.useRealTimers();
-    await new Promise((r) => setTimeout(r, 100));
     const orphanKeys = mgr1.allKeys('session');
     expect(orphanKeys.length).toBe(2);
 
@@ -495,16 +494,13 @@ describe('SessionStorageAdapter', () => {
     expect(mgr.allKeys('session').length).toBe(2);
   });
 
-  // claim mode without idb: handleClaimWrite false branch (if this.idb is null)
-  it('should silently skip IDB claim when no idb adapter is configured', async () => {
-    // No idb adapter set → handleClaimWrite skips the idb.put path
+  // claim mode without idb: F-37 fix — now throws UNSUPPORTED_ENV instead of silently skipping
+  it('should throw UNSUPPORTED_ENV when claim mode is used without an IDB adapter', async () => {
     const adapter = new SessionStorageAdapter(resolveConfig(), session, new TesseraEmitter());
-    // This exercises the false branch of `if (this.idb)` in handleClaimWrite
-    await adapter.setItem('claim-no-idb', 'val', { mode: 'claim' });
-    // Without idb, the claim token is stored in sessionStorage but nothing in IDB
-    // Reading it back without idb returns null (no claim source)
-    const result = await adapter.getItem('claim-no-idb');
-    expect(result).toBeNull();
+    // F-37: IDB is required for claim mode — throws instead of silently skipping
+    await expect(adapter.setItem('claim-no-idb', 'val', { mode: 'claim' })).rejects.toMatchObject({
+      code: 'UNSUPPORTED_ENV',
+    });
   });
 
   // getRawKey when locked returns developer key unchanged (covers line 200 true branch)
@@ -636,19 +632,19 @@ describe('SessionStorageAdapter', () => {
     expect(result!.halfLifeSoft).toBeUndefined();
   });
 
-  // handleSplitWrite false branch of `if (this.idb)` (covers lines 200-219 false branch)
-  it('should write split: prefix to sessionStorage without IDB when no idb adapter set', async () => {
+  // handleSplitWrite: F-37 fix — throws UNSUPPORTED_ENV when no IDB adapter set
+  it('should throw UNSUPPORTED_ENV when split mode is used without an IDB adapter', async () => {
     const adapter = new SessionStorageAdapter(
       resolveConfig({ debug: true }),
       session,
       new TesseraEmitter(),
     );
-    // No idb adapter → handleSplitWrite skips the `if (this.idb)` block
-    await adapter.setItem('split-no-idb-2', 'val', { mode: 'split' });
-    const rawKey = await adapter.getRawKey!('split-no-idb-2');
-    const raw = sessionStorage.getItem(rawKey);
-    expect(raw).not.toBeNull();
-    expect(raw?.startsWith('split:')).toBe(true);
+    // F-37: IDB is required for split mode — throws instead of writing split: prefix
+    await expect(adapter.setItem('split-no-idb-2', 'val', { mode: 'split' })).rejects.toMatchObject(
+      {
+        code: 'UNSUPPORTED_ENV',
+      },
+    );
   });
 
   // wipeHighSensitivity: skips split: and ref: prefixed entries (covers lines 148-163)
@@ -726,11 +722,7 @@ describe('SessionStorageAdapter', () => {
     >[0]);
     const adapterWithHoney = new SessionStorageAdapter(config, session, new TesseraEmitter());
     adapterWithHoney.setHoneyManager(fakeMgr);
-    vi.useFakeTimers();
     await adapterWithHoney.setItem('h-key', 'h-val');
-    vi.runAllTimers();
-    vi.useRealTimers();
-    await new Promise((r) => setTimeout(r, 100));
     // Honey keys should appear in sessionStorage
     expect(sessionStorage.getItem('honey_0')).not.toBeNull();
   });
@@ -789,5 +781,54 @@ describe('SessionStorageAdapter', () => {
     expect(exported).toBeNull();
     expect(honeyHits).toBe(1);
     suspicion.destroy();
+  });
+
+  // claim mode + honey keys: writeHoneyKeysInterleaved writes honey entries alongside the claim
+  it('claim mode with honey keys writes honey entries in sessionStorage', async () => {
+    const config = resolveConfig({ honeyKeys: { count: 2 } } as Parameters<
+      typeof resolveConfig
+    >[0]);
+    const events = new TesseraEmitter();
+    const idbAdapter = new IndexedDbAdapter(config, session, events);
+    const adapter = new SessionStorageAdapter(config, session, events);
+    adapter.setIdbAdapter(idbAdapter);
+    const { HoneyKeyManager } = await import('../../src/storage/honey');
+    const mgr = new HoneyKeyManager(config);
+    adapter.setHoneyManager(mgr);
+
+    await adapter.setItem('claim-ss-key', 'claim-ss-val', { mode: 'claim' });
+
+    expect(await adapter.getItem('claim-ss-key')).toBe('claim-ss-val');
+    const honeyKeys = mgr.allKeys('session');
+    expect(honeyKeys.length).toBe(2);
+  });
+
+  // ── maxValueBytes and onBeforeWrite ──────────────────────────────────────────
+
+  it('throws VALIDATION_ERROR when sessionStorage value exceeds maxValueBytes', async () => {
+    const cfg = resolveConfig({ maxValueBytes: 5 });
+    const events = new TesseraEmitter();
+    const adapter = new SessionStorageAdapter(cfg, session, events);
+    const { TesseraErrorCode } = await import('../../src/types');
+    await expect(adapter.setItem('k', 'this-is-longer-than-5-bytes')).rejects.toMatchObject({
+      code: TesseraErrorCode.VALIDATION_ERROR,
+    });
+  });
+
+  it('throws VALIDATION_ERROR when onBeforeWrite returns false for sessionStorage', async () => {
+    const cfg = resolveConfig({ onBeforeWrite: () => false });
+    const events = new TesseraEmitter();
+    const adapter = new SessionStorageAdapter(cfg, session, events);
+    const { TesseraErrorCode } = await import('../../src/types');
+    await expect(adapter.setItem('k', 'v')).rejects.toMatchObject({
+      code: TesseraErrorCode.VALIDATION_ERROR,
+    });
+  });
+
+  it('allows sessionStorage write when onBeforeWrite returns true', async () => {
+    const cfg = resolveConfig({ onBeforeWrite: () => true });
+    const events = new TesseraEmitter();
+    const adapter = new SessionStorageAdapter(cfg, session, events);
+    await expect(adapter.setItem('k', 'v')).resolves.not.toThrow();
   });
 });

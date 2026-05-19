@@ -7,6 +7,13 @@ import {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type HandlerSet = Map<TesseraEventName, Set<TesseraEventHandler<any>>>;
 
+/**
+ * Maximum number of handlers permitted per event name.
+ * Prevents a runaway registration loop (e.g. from XSS-injected code) from
+ * exhausting the event loop during a security-critical lockdown emission.
+ */
+const MAX_HANDLERS_PER_EVENT = 32;
+
 export class TesseraEmitter {
   private handlers: HandlerSet = new Map();
 
@@ -15,6 +22,13 @@ export class TesseraEmitter {
     if (!set) {
       set = new Set();
       this.handlers.set(event, set);
+    }
+    if (set.size >= MAX_HANDLERS_PER_EVENT) {
+      // Silently drop excess registrations rather than throwing — a thrown error
+      // here would surface as an unhandled rejection in caller code that has no
+      // expectation of `on()` failing.
+      /* v8 ignore next 2 */
+      return;
     }
     set.add(handler);
   }

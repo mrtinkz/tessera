@@ -8,25 +8,29 @@ each threat.
 
 ## In-scope threats
 
-| ID | Threat | Vector | Mitigation |
-|---|---|---|---|
-| **T1** | Physical access | An attacker reads browser DevTools storage on a shared or unlocked machine | All values are AES-256-GCM ciphertext — unreadable without the passcode |
-| **T2** | XSS exfiltration | Injected script reads `localStorage` or `sessionStorage` | Ciphertext is useless without the derived key; the key is never persisted — it lives only in a JavaScript closure |
-| **T3** | Keylogging / click-sequence recording | Malware or injected JS captures keystrokes or click coordinates | The PIN pad renders digits onto a `HTMLCanvasElement`. Pointer events expose only (x, y) coordinates. The digit-zone map lives exclusively in a closure and is never written to the DOM. |
-| **T4** | Shoulder surfing | Bystander watches screen during PIN entry | The PIN pad shows `●` glyphs by default; digits are only revealed while the "Hold to reveal" button is pressed |
-| **T5** | Offline brute force | Attacker dumps localStorage, runs offline cracker | PBKDF2-SHA-256 at ≥ 310 000 iterations + 128-bit random salt per value ≈ 1 second per attempt on modern hardware |
-| **T6** | Man-in-the-middle | Network interception of stored data | tessera operates on storage, not transport. Data is encrypted before any network contact. Complements TLS. |
-| **T7** | Key extraction from memory | Attacker reads JS heap or DevTools memory snapshot | `CryptoKey` is `extractable: false` — the Web Crypto API prevents serialisation or exfiltration of raw key bytes |
-| **T8** | On-device brute force | Repeated PIN attempts on a public terminal | Configurable lockout: `lockoutAction: 'wipe'` wipes all vault data after N wrong attempts; `'delay'` applies exponential backoff; `'throw'` locks permanently |
-| **T9** | Cookie / storage tampering | Attacker modifies an encrypted value in storage | AES-GCM authentication tag detects any byte-level modification and fails decryption before plaintext is recovered |
-| **T10** | Timing attacks | Script measures decrypt timing to infer the PIN | Failure and success paths are constant-time within the Web Crypto engine's own implementation |
+| ID      | Threat                                | Vector                                                                     | Mitigation                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------- | ------------------------------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **T1**  | Physical access                       | An attacker reads browser DevTools storage on a shared or unlocked machine | All values are AES-256-GCM ciphertext — unreadable without the passcode                                                                                                                                                                                                                                                                                                                                                                   |
+| **T2**  | XSS exfiltration                      | Injected script reads `localStorage` or `sessionStorage`                   | Ciphertext is useless without the derived key; the key is never persisted — it lives only in a JavaScript closure. tessera emits a `csp-warning` event at unlock time when no CSP is detected (see `cspCheck` option). Additionally, a proxy on `localStorage.getItem` / `sessionStorage.getItem` is installed at unlock time: any script that enumerates storage natively trips honey detection before it can learn which keys are real. |
+| **T3**  | Keylogging / click-sequence recording | Malware or injected JS captures keystrokes or click coordinates            | The PIN pad renders digits onto a `HTMLCanvasElement`. Pointer events expose only (x, y) coordinates. The digit-zone map lives exclusively in a closure and is never written to the DOM.                                                                                                                                                                                                                                                  |
+| **T4**  | Shoulder surfing                      | Bystander watches screen during PIN entry                                  | The PIN pad shows `●` glyphs by default; digits are only revealed while the "Hold to reveal" button is pressed                                                                                                                                                                                                                                                                                                                            |
+| **T5**  | Offline brute force                   | Attacker dumps localStorage, runs offline cracker                          | PBKDF2-SHA-256 at ≥ 310 000 iterations + 128-bit random salt per value ≈ 1 second per attempt on a single CPU core; modern GPUs can do ~10 000× faster — strong alphanumeric passcodes are critical                                                                                                                                                                                                                                       |
+| **T6**  | Man-in-the-middle                     | Network interception of stored data                                        | tessera operates on storage, not transport. Data is encrypted before any network contact. Complements TLS.                                                                                                                                                                                                                                                                                                                                |
+| **T7**  | Key extraction from memory            | Attacker reads JS heap or DevTools memory snapshot                         | `CryptoKey` is `extractable: false` — the Web Crypto API prevents serialisation or exfiltration of raw key bytes                                                                                                                                                                                                                                                                                                                          |
+| **T8**  | On-device brute force                 | Repeated PIN attempts on a public terminal                                 | Configurable lockout: `lockoutAction: 'wipe'` wipes all vault data after N wrong attempts; `'delay'` applies exponential backoff; `'throw'` locks permanently                                                                                                                                                                                                                                                                             |
+| **T9**  | Cookie / storage tampering            | Attacker modifies an encrypted value in storage                            | AES-GCM authentication tag detects any byte-level modification and fails decryption before plaintext is recovered                                                                                                                                                                                                                                                                                                                         |
+| **T10** | Timing attacks                        | Script measures decrypt timing to infer the PIN                            | Failure and success paths are constant-time within the Web Crypto engine's own implementation                                                                                                                                                                                                                                                                                                                                             |
+| **T11** | Storage replay                        | Attacker replaces a current ciphertext with an older captured blob         | AES-GCM IV and salt are randomised per-encrypt-call; the HMAC-signed metadata block (`writeTime`, `readCount`) allows adapters to detect replay and trigger a wipe                                                                                                                                                                                                                                                                        |
+| **T12** | Cross-vault data leakage              | Two vaults on the same origin share storage keys and overwrite each other  | `vaultId` namespacing isolates all localStorage keys, the IDB database name, and lockout records — multiple vaults coexist on the same origin without collision                                                                                                                                                                                                                                                                           |
+| **T13** | Cross-tab forced lock (DoS)           | A same-origin page sends a forged BroadcastChannel lock message            | Lock messages carry an AES-GCM-encrypted proof keyed with the vault key. Tabs that do not hold the vault key cannot forge valid proofs; invalid messages are ignored.                                                                                                                                                                                                                                                                     |
+| **T14** | Split share exposure                  | One half of a split-mode value is captured                                 | In `mode: 'split'`, Share A (the XOR pad) is encrypted with the vault key before being written to sessionStorage. An attacker who captures Share A from sessionStorage gets ciphertext, not the XOR pad.                                                                                                                                                                                                                                  |
 
 ---
 
 ## Cryptographic design
 
 ```
-Passcode (6–8 chars)
+Passcode (≥6 chars, alphanumeric recommended)
        │
        ▼
   [PBKDF2-SHA-256]  ← 128-bit random salt (unique per stored value)
@@ -42,14 +46,14 @@ Passcode (6–8 chars)
   Stored payload = base64( salt(16) ‖ iv(12) ‖ ciphertext ‖ auth-tag(16) )
 ```
 
-| Component | Choice | Rationale |
-|---|---|---|
-| Encryption | AES-256-GCM | AEAD — confidentiality + integrity + authenticity in one pass. NIST SP 800-38D. |
-| Key derivation | PBKDF2-SHA-256 | RFC 2898. Slows brute force to ~1 s/attempt at 310 K iterations. OWASP 2024 minimum. |
-| Salt | 128-bit `crypto.getRandomValues()` | Per-value uniqueness. Prevents rainbow-table attacks. |
-| IV | 96-bit `crypto.getRandomValues()` | Per-encrypt-call uniqueness. Prevents GCM nonce reuse. |
-| Key extractability | `extractable: false` | Web Crypto guarantee: raw key bits cannot be serialised or posted out of the engine. |
-| External crypto libs | None | 100 % native `globalThis.crypto.subtle`. Zero supply-chain attack surface. |
+| Component            | Choice                             | Rationale                                                                            |
+| -------------------- | ---------------------------------- | ------------------------------------------------------------------------------------ |
+| Encryption           | AES-256-GCM                        | AEAD — confidentiality + integrity + authenticity in one pass. NIST SP 800-38D.      |
+| Key derivation       | PBKDF2-SHA-256                     | RFC 2898. Slows brute force to ~1 s/attempt at 310 K iterations. OWASP 2024 minimum. |
+| Salt                 | 128-bit `crypto.getRandomValues()` | Per-value uniqueness. Prevents rainbow-table attacks.                                |
+| IV                   | 96-bit `crypto.getRandomValues()`  | Per-encrypt-call uniqueness. Prevents GCM nonce reuse.                               |
+| Key extractability   | `extractable: false`               | Web Crypto guarantee: raw key bits cannot be serialised or posted out of the engine. |
+| External crypto libs | None                               | 100 % native `globalThis.crypto.subtle`. Zero supply-chain attack surface.           |
 
 ---
 
@@ -62,7 +66,15 @@ initialises**, they can hook `Tessera.unlock()` and capture the passcode in
 plaintext. tessera is a complement to a strong Content Security Policy and
 input-sanitisation posture — not a replacement for them.
 
+The native storage proxy (installed at unlock time) does catch **naive**
+XSS payloads and extensions that enumerate `localStorage` via the standard
+`getItem` API — they will trip honey detection and trigger a lockdown before
+they can determine which keys are real. However, a targeted attacker who
+bypasses the proxy with `Storage.prototype.getItem.call(localStorage, key)`
+is not stopped.
+
 **Mitigation at the application level:**
+
 - Set a strict CSP (`script-src 'self'`).
 - Sanitise all user input with a trusted library.
 - Use `Subresource Integrity` on tessera's CDN script tag.

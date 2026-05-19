@@ -168,7 +168,12 @@ describe('HoneyKeyManager', () => {
 
   it('syntheticAlias() falls back to cache_syncN after 50 failed attempts', () => {
     const mgr = makeManager(3);
-    vi.spyOn(Math, 'random').mockReturnValue(0);
+    vi.spyOn(crypto, 'getRandomValues').mockImplementation((array) => {
+      if (array instanceof Uint8Array || array instanceof Uint16Array) {
+        (array as Uint8Array).fill(0);
+      }
+      return array as ReturnType<typeof crypto.getRandomValues>;
+    });
     mgr.assignDecoyAlias('local', 't_honey1', ['cache_data']);
     expect(mgr.isDecoyAlias('local', 'cache_sync0')).toBe(true);
     vi.restoreAllMocks();
@@ -235,4 +240,31 @@ describe('HoneyKeyManager — storage format matches real entries', () => {
     // Across 15 honey key entries (5 vaults × 3 keys) we expect multiple distinct lengths
     expect(valueLengths.size).toBeGreaterThan(1);
   }, 30_000);
+
+  // ── P5: maxHoneyKeysPerBackend FIFO cap ───────────────────────────────────────
+
+  it('evicts the oldest entry when maxPerBackend cap is reached (P5)', () => {
+    const cfg = resolveConfig({ honeyKeys: { count: 3, maxPerBackend: 3 } });
+    const mgr = new HoneyKeyManager(cfg);
+
+    mgr.add('local', 'key-1');
+    mgr.add('local', 'key-2');
+    mgr.add('local', 'key-3');
+    // All three are present
+    expect(mgr.isHoney('local', 'key-1')).toBe(true);
+    expect(mgr.isHoney('local', 'key-2')).toBe(true);
+    expect(mgr.isHoney('local', 'key-3')).toBe(true);
+
+    // Adding a 4th evicts the oldest (key-1)
+    mgr.add('local', 'key-4');
+    expect(mgr.isHoney('local', 'key-1')).toBe(false);
+    expect(mgr.isHoney('local', 'key-4')).toBe(true);
+    expect(mgr.isHoney('local', 'key-2')).toBe(true);
+    expect(mgr.isHoney('local', 'key-3')).toBe(true);
+  });
+
+  it('uses the default maxPerBackend of 500 when not set (P5)', () => {
+    const cfg = resolveConfig({ honeyKeys: { count: 3 } });
+    expect(cfg.honeyKeys.maxPerBackend).toBe(500);
+  });
 });

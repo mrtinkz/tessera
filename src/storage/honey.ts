@@ -60,6 +60,13 @@ export class HoneyKeyManager {
       set = new Set();
       this.honeyKeys.set(backend, set);
     }
+    // FIFO eviction: if the per-backend cap is reached, drop the oldest entry
+    // (JS Set preserves insertion order, so .values().next().value is oldest).
+    const maxPerBackend = this.config.honeyKeys.maxPerBackend ?? 500;
+    if (set.size >= maxPerBackend) {
+      const oldest = set.values().next().value as string;
+      set.delete(oldest);
+    }
     set.add(key);
   }
 
@@ -114,12 +121,15 @@ export class HoneyKeyManager {
     let alias: string;
     let attempts = 0;
     do {
-      const a = WORDS_A[Math.floor(Math.random() * WORDS_A.length)]!;
-      const b = WORDS_B[Math.floor(Math.random() * WORDS_B.length)]!;
+      // WORDS_A and WORDS_B each have 8 entries; 256 % 8 === 0 so no modulo bias.
+      const rands = crypto.getRandomValues(new Uint8Array(2));
+      const a = WORDS_A[rands[0]! % WORDS_A.length]!;
+      const b = WORDS_B[rands[1]! % WORDS_B.length]!;
       alias = a === b ? styledAlias(a, 'state', style) : styledAlias(a, b, style);
       attempts++;
       if (attempts > 50) {
-        alias = styledAlias('cache', `sync${Math.floor(Math.random() * 999)}`, style);
+        const n = crypto.getRandomValues(new Uint16Array(1))[0]!;
+        alias = styledAlias('cache', `sync${n % 1000}`, style);
       }
     } while (excluded.has(alias));
     return alias;

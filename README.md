@@ -62,6 +62,9 @@ vault.on('honey-triggered', ({ backend, score }) => {
 - [Sensitivity Levels](#sensitivity-levels)
 - [Storage Modes (direct · claim · split)](#storage-modes)
 - [Events](#events)
+- [Scoped Vault](#scoped-vault)
+- [Multiple Vaults](#multiple-vaults)
+- [Developer Introspection](#developer-introspection)
 - [PIN Pad](#pin-pad)
 - [Honey Keys](#honey-keys)
 - [Suspicion Engine](#suspicion-engine)
@@ -328,22 +331,33 @@ Calling `vault.lock()` immediately discards the in-memory key. Any subsequent `g
 
 All options are optional; defaults are shown.
 
-| Option                          | Type                                        | Default    | Description                                                                                                                                                |
-| ------------------------------- | ------------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `iterations`                    | `number`                                    | `310_000`  | PBKDF2-SHA-256 iteration count. Must be ≥ 310 000 (OWASP 2024). Increase for higher security on fast hardware.                                             |
-| `idleTimeout`                   | `number` (ms)                               | `900_000`  | Auto-lock after this many milliseconds of inactivity. Resets on every read/write.                                                                          |
-| `lockoutAttempts`               | `number`                                    | `5`        | Failed `Tessera.unlock()` calls before lockout fires.                                                                                                      |
-| `lockoutAction`                 | `'wipe' \| 'delay' \| 'throw'`              | `'delay'`  | **wipe** — clears all storage and throws `LOCKOUT`. **delay** — exponential backoff (no data loss). **throw** — throws `LOCKOUT` immediately, permanently. |
-| `lockoutDelay`                  | `number` (ms)                               | `30_000`   | Starting backoff delay for `'delay'` action. Doubles on each lockout trigger.                                                                              |
-| `defaultSensitivity`            | `'low' \| 'medium' \| 'high' \| 'critical'` | `'medium'` | Sensitivity preset applied to every key that does not specify its own.                                                                                     |
-| `defaults.ttl`                  | `number` (ms)                               | —          | Default time-to-live for all keys. Keys silently expire and self-delete after this duration.                                                               |
-| `defaults.maxReads`             | `number`                                    | —          | Default read limit. Keys self-delete after this many reads.                                                                                                |
-| `defaults.onSuspicion`          | `'wipe' \| 'lock' \| 'throw'`               | `'wipe'`   | What to do when an HMAC integrity check fails on a stored value.                                                                                           |
-| `honeyKeys.count`               | `number`                                    | `3`        | Number of decoy entries planted in the same backend after each write. Set to `0` to disable.                                                               |
-| `halfLife.soft`                 | `number` (ms)                               | —          | After this duration, reads require `vault.reconfirm(passcode)` before succeeding.                                                                          |
-| `halfLife.hard`                 | `number` (ms)                               | —          | After this duration, the key is deleted unconditionally.                                                                                                   |
-| `suspicion.platform`            | `'auto' \| 'desktop' \| 'mobile'`           | `'auto'`   | Tunes visibility-change sensitivity for mobile vs desktop usage patterns.                                                                                  |
-| `suspicion.thresholds.lockdown` | `number`                                    | `100`      | Suspicion score that triggers vault lockdown and a full wipe of all encrypted entries across every backend.                                                |
+| Option                          | Type                                        | Default     | Description                                                                                                                                                                                                                      |
+| ------------------------------- | ------------------------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `iterations`                    | `number`                                    | `310_000`   | PBKDF2-SHA-256 iteration count. Must be ≥ 310 000 (OWASP 2024). Increase for higher security on fast hardware.                                                                                                                   |
+| `idleTimeout`                   | `number` (ms)                               | `900_000`   | Auto-lock after this many milliseconds of inactivity. Resets on every read/write. Values below 1 000 ms emit `console.warn` — the vault can lock between async adapter operations, causing silent `null` returns from `getItem`. |
+| `lockoutAttempts`               | `number`                                    | `5`         | Failed `Tessera.unlock()` calls before lockout fires. Clamped to `[3, 20]` — values outside this range are silently corrected.                                                                                                   |
+| `lockoutAction`                 | `'wipe' \| 'delay' \| 'throw'`              | `'delay'`   | **wipe** — clears all storage and throws `LOCKOUT`. **delay** — exponential backoff (no data loss). **throw** — throws `LOCKOUT` immediately, permanently.                                                                       |
+| `lockoutDelay`                  | `number` (ms)                               | `30_000`    | Starting backoff delay for `'delay'` action. Doubles on each lockout trigger.                                                                                                                                                    |
+| `defaultSensitivity`            | `'low' \| 'medium' \| 'high' \| 'critical'` | `'medium'`  | Sensitivity preset applied to every key that does not specify its own.                                                                                                                                                           |
+| `defaults.ttl`                  | `number` (ms)                               | —           | Default time-to-live for all keys. Keys silently expire and self-delete after this duration.                                                                                                                                     |
+| `defaults.maxReads`             | `number`                                    | —           | Default read limit. Keys self-delete after this many reads.                                                                                                                                                                      |
+| `defaults.onSuspicion`          | `'wipe' \| 'lock' \| 'throw'`               | `'wipe'`    | What to do when an HMAC integrity check fails on a stored value.                                                                                                                                                                 |
+| `honeyKeys.count`               | `number`                                    | `3`         | Number of decoy entries planted in the same backend after each write. Set to `0` to disable.                                                                                                                                     |
+| `halfLife.soft`                 | `number` (ms)                               | —           | After this duration, reads require `vault.reconfirm(passcode)` before succeeding.                                                                                                                                                |
+| `halfLife.hard`                 | `number` (ms)                               | —           | After this duration, the key is deleted unconditionally.                                                                                                                                                                         |
+| `suspicion.platform`            | `'auto' \| 'desktop' \| 'mobile'`           | `'auto'`    | Tunes visibility-change sensitivity for mobile vs desktop usage patterns.                                                                                                                                                        |
+| `suspicion.thresholds.lockdown` | `number`                                    | `100`       | Suspicion score that triggers vault lockdown and a full wipe of all encrypted entries across every backend.                                                                                                                      |
+| `vaultId`                       | `string`                                    | `'default'` | Namespace for this vault. Change this to run multiple independent vaults on the same origin without collision. See [Multiple Vaults](#multiple-vaults).                                                                          |
+| `cspCheck`                      | `'warn' \| 'require' \| false`              | `'warn'`    | **warn** — emits `csp-warning` if no CSP is detected. **require** — throws `UNSUPPORTED_ENV` if no CSP is found. **false** — disables the check (use when CSP is set via HTTP header).                                           |
+| `debug`                         | `boolean`                                   | `false`     | Enables `vault.local.getRawKey()` / `vault.session.getRawKey()` for storage key inspection. Keep `false` in production — it exposes the alias→key mapping.                                                                       |
+| `selectiveKeys`                 | `string[]`                                  | —           | When set, only keys in this list can be written or read. Acts as an allowlist for the whole vault session.                                                                                                                       |
+| `maxValueBytes`                 | `number`                                    | —           | Maximum plaintext value size in bytes. Writes exceeding this limit throw `VALIDATION_ERROR` before encryption. Applied across all four adapters.                                                                                 |
+| `onBeforeWrite`                 | `(key: string, value: string) => boolean`   | —           | Write-time validation hook. Return `false` to abort the write and throw `VALIDATION_ERROR`. Receives the developer alias (pre-rotation) and plaintext value.                                                                     |
+| `maxUnlockDurationMs`           | `number` (ms)                               | —           | Absolute vault-open duration ceiling, independent of idle-timeout resets. The vault locks once it has been open for this long, even with ongoing reads/writes.                                                                   |
+| `honeyKeys.maxPerBackend`       | `number`                                    | `500`       | FIFO eviction cap on the in-memory honey key registry per backend. Prevents unbounded `Set` growth in long-lived sessions with high write volume.                                                                                |
+| `suspicion.persistScore`        | `boolean`                                   | `false`     | Persist the suspicion score across page reloads as an HMAC-signed snapshot. Decay-adjusted on `unlock()` — idle time naturally reduces the score.                                                                                |
+| `contextBinding.webauthn`       | `boolean`                                   | `false`     | Require a WebAuthn platform authenticator (TouchID / FaceID / Windows Hello) as a second factor. Enrolled on first unlock; asserted on every subsequent unlock. Origin-bound and hardware-backed.                                |
+| `contextBinding.onMismatch`     | `'throw' \| 'lock' \| 'wipe'`               | `'throw'`   | Action when the WebAuthn assertion fails. Only applies when `contextBinding.webauthn` is `true`.                                                                                                                                 |
 
 ---
 
@@ -487,6 +501,114 @@ vault.on('reconfirmation-required', async ({ keyAlias }) => {
 
 ---
 
+## Scoped Vault
+
+`vault.scope(keys, ops?)` returns a lightweight proxy that restricts which key names can be used and which operations (read / write) are permitted. Pass it to a sub-component that should only touch a subset of the vault's data.
+
+```ts
+// This component can only read 'theme' and 'locale' — it cannot write them
+// and cannot access any other key.
+const readOnly = vault.scope(['theme', 'locale'], ['read']);
+await readOnly.local.getItem('theme'); // ✓ allowed
+await readOnly.local.setItem('theme', 'dark'); // ✗ throws PERMISSION_DENIED
+await readOnly.local.getItem('token'); // ✗ throws PERMISSION_DENIED
+
+// Default: all ops allowed, key list enforced
+const limited = vault.scope(['cart', 'draft']);
+await limited.local.setItem('cart', '...'); // ✓
+await limited.local.getItem('token'); // ✗ PERMISSION_DENIED
+```
+
+> **Note:** `vault.scope()` is a JavaScript-only guard, not a cryptographic boundary. Code that holds a reference to the original `vault` can still access every key. Use it for developer ergonomics and component isolation, not for security between mutually distrusting modules.
+
+---
+
+## Multiple Vaults
+
+By default every `Tessera.unlock()` call connects to the same vault namespace (`vaultId: 'default'`). Use a different `vaultId` to run independent vaults on the same origin — for example, one vault per tenant in a multi-tenant app.
+
+```ts
+const adminVault = await Tessera.unlock(adminPasscode, { vaultId: 'admin' });
+const userVault = await Tessera.unlock(userPasscode, { vaultId: 'user' });
+
+// Storage keys, IDB database name, and lockout counters are fully isolated.
+// Honey keys from one vault never trip the other.
+await adminVault.local.setItem('config', JSON.stringify(cfg));
+await userVault.local.setItem('config', JSON.stringify(userCfg));
+```
+
+Each `vaultId` gets its own `localStorage` key prefix, its own IDB database (`tessera_vault_<id>`), and its own lockout record. There is no sharing between vaults.
+
+---
+
+## Developer Introspection
+
+### `exportItem(key)`
+
+`vault.local.exportItem(key)` and `vault.session.exportItem(key)` return the decrypted value **and** its full metadata snapshot without incrementing the `readCount`. This is useful during development for inspecting what tessera has stored.
+
+```ts
+const snapshot = await vault.local.exportItem('session-token');
+console.log(snapshot);
+// {
+//   value: 'eyJ...',
+//   writeTime: 1716000000000,
+//   readCount: 3,
+//   ttl: 900000,
+//   sensitivity: 'high',
+//   ...
+// }
+```
+
+> `exportItem` does not expose the raw storage key (`t_abc123...`). If you need that for debugging, unlock with `debug: true` and call `vault.local.getRawKey(alias)`.
+
+### Debug mode
+
+```ts
+const vault = await Tessera.unlock(passcode, { debug: true });
+const storageKey = await vault.local.getRawKey('cart');
+// → 't_4a8f3c2e1b...'
+```
+
+Keep `debug: false` (the default) in production. With the flag off, `getRawKey()` throws — this closes an enumeration shortcut an attacker with vault access could use to distinguish real keys from honey keys.
+
+### `signChallenge(challenge, expiresAt)`
+
+`vault.signChallenge(challenge, expiresAt)` produces an HMAC-SHA256 proof that the vault was opened within a server-issued time window. Use it for server-enforced session binding without ever transmitting the vault key.
+
+```ts
+// Server issues a short-lived challenge (e.g. from your auth API):
+const { nonce, expiresAt } = await fetchServerChallenge();
+// nonce: Uint8Array, expiresAt: Unix timestamp in ms
+
+// After unlock, produce the proof:
+const proof = await vault.signChallenge(nonce, expiresAt);
+
+// Send to server — it verifies:
+//   • the vault was opened (HMAC is producible only with the derived key)
+//   • the challenge has not expired (client-side: throws LOCKOUT if Date.now() >= expiresAt)
+//   • replay is impossible (nonce is single-use)
+await sendProofToServer(proof);
+```
+
+> Set a generous `expiresAt` window (≥ 5 minutes) to absorb minor clock drift between client and server.
+
+### `renderFingerprint(canvas, position?)`
+
+`vault.renderFingerprint(canvas)` draws a deterministic visual trust indicator onto a canvas element. The indicator is derived from `HMAC-SHA256(hmacKey, 'visual-fingerprint')`, producing a unique symmetric 5×5 identicon for each vault passcode. The same passcode always produces the same icon; a wrong passcode — or a phishing page that cannot know the passcode — produces a visually distinct one.
+
+```ts
+const canvas = document.getElementById('fingerprint') as HTMLCanvasElement;
+await vault.renderFingerprint(canvas);
+
+// Optional position: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'center'
+await vault.renderFingerprint(canvas, 'top-right');
+```
+
+Display the fingerprint immediately after unlock — before showing any sensitive content — so the user can verify they opened the correct vault.
+
+---
+
 ## PIN Pad
 
 tessera ships a canvas-based PIN pad that mitigates keylogging and click-recording attacks. Digit positions are re-randomised after every completed entry; no DOM element carries a digit label that a script could read.
@@ -538,11 +660,15 @@ The canvas PIN pad only handles digit input (0–9). For passphrase-style unlock
 }
 ```
 
+### Canvas exfiltration protection
+
+After the first render, tessera overrides `canvas.toDataURL → ''` and `canvas.toBlob → no-op` on the PIN pad canvas element. This closes the XSS exfiltration path where attacker code screenshots the canvas to reconstruct the zone map (which coordinate maps to which digit). Both are restored to the native prototype methods when the returned cleanup function is called.
+
 ---
 
 ## Honey Keys
 
-After every write, tessera plants N decoy entries in localStorage. These entries look identical to real encrypted keys (`t_` + 32 hex chars with plausible-looking ciphertext). Any code path that touches a honey key increments the suspicion score.
+After every write, tessera plants N decoy entries in the same backend. These entries look byte-for-byte identical to real encrypted keys (`t_` + 32 hex chars with plausible-looking ciphertext). Any code path that touches one increments the suspicion score.
 
 ```ts
 // Enable 5 honey keys (default is 3)
@@ -556,7 +682,20 @@ vault.on('honey-triggered', ({ backend, score }) => {
 });
 ```
 
-On `vault.lock()` and `vault.terminate()`, the in-memory honey registry is cleared. The storage entries themselves persist until the next `Tessera.unlock()`, which runs orphan cleanup in the background and removes any stale decoys.
+### Native storage proxy
+
+Honey keys also work for code that never goes through the tessera API. At unlock time, tessera installs a thin proxy on `localStorage.getItem` and `sessionStorage.getItem`. An XSS payload that iterates `localStorage`, a browser extension enumerating all storage, or a DevTools snippet that reads keys directly — all of them will trip honey detection automatically.
+
+```ts
+// This fires 'honey-triggered' even though it never called vault.local.getItem:
+window.localStorage.getItem('t_some_key');
+```
+
+The proxy is removed when the vault locks, terminates, or goes into lockdown.
+
+### Orphan cleanup
+
+On `vault.lock()` and `vault.terminate()`, the in-memory honey registry is cleared. The decoy storage entries persist until the next `Tessera.unlock()`, which runs orphan cleanup in the background and silently removes any stale decoys from previous sessions.
 
 ---
 
@@ -589,6 +728,18 @@ const vault = await Tessera.unlock(passcode, {
 vault.on('suspicion-lockdown', ({ reason, keysWiped }) => {
   console.error(`Vault locked: ${reason}. Wiped: ${keysWiped.join(', ')}`);
   redirectToLoginPage();
+});
+```
+
+### Cross-session score persistence
+
+By default the suspicion score resets to zero on every page reload. Enable `suspicion.persistScore` to carry the score across sessions. The score is HMAC-signed and written to `localStorage` on every increment; on `unlock()` it is verified, loaded, and exponential-decay-adjusted so that idle time reduces the score between sessions.
+
+```ts
+const vault = await Tessera.unlock(passcode, {
+  suspicion: {
+    persistScore: true, // reload-resilient threat memory
+  },
 });
 ```
 
@@ -778,7 +929,7 @@ tessera targets the [OWASP browser storage threat model](https://owasp.org/www-c
 
 - **An open vault during XSS.** If an attacker has JavaScript running in your page while the vault is unlocked, they can call vault methods and read decrypted values — the same as any other code on the page can. This is not a tessera limitation; it is how browsers work. Any JavaScript in your page runs with the same permissions you do. What tessera protects is the data at rest: a stolen storage dump, a database backup, a browser extension that reads `localStorage` — all of those get ciphertext and nothing useful. Lock the vault as soon as it is not needed. See [Locking strategy](#locking-strategy).
 
-- **A targeted, informed attacker in your JS context.** The native storage proxy (installed at unlock time to catch scripts that read honey keys without going through the tessera API) can be bypassed by code that calls `Storage.prototype.getItem.call(localStorage, key)` directly. An attacker sophisticated enough to do that already has full execution in your page and can keylog the passcode as it is typed. The proxy catches naive enumeration scripts. It was never meant to stop a targeted attack — that is what IAM and server-side auth are for.
+- **A targeted, informed attacker in your JS context.** The native storage proxy catches naive enumeration scripts — XSS payloads, extensions, and DevTools snippets that iterate `localStorage` will trip honey detection automatically. But a targeted attacker who calls `Storage.prototype.getItem.call(localStorage, key)` directly bypasses the proxy. Someone sophisticated enough to do that already has full execution in your page and can keylog the passcode as it is typed. The proxy is a significant barrier against automated attacks; it was never designed to stop a deliberate, informed adversary — that is what IAM and server-side auth are for.
 
 - **Compromised device.** If the user's OS or browser is compromised at the system level, all bets are off.
 
@@ -790,11 +941,34 @@ tessera targets the [OWASP browser storage threat model](https://owasp.org/www-c
 
 ## Changelog
 
-> **Important:** All users must upgrade to **0.1.4**. Earlier versions contain honey key security vulnerabilities. Upgrade immediately:
+> **Latest release: 0.1.5.** Security hardening, new vault methods, and a bug fix. Always use the latest version:
 >
 > ```bash
-> npm install @mrtinkz/tessera@0.1.4
+> npm install @mrtinkz/tessera@latest
 > ```
+
+### 0.1.5
+
+Security hardening and new features — no breaking API changes, no migration required.
+
+| Area                                         | What changed                                                                                                                                                                                               |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `vault.signChallenge(challenge, expiresAt)`  | New vault method. Produces an HMAC-SHA256 proof-of-unlock for server-side challenge-response. Throws `LOCKOUT` when the challenge window has expired.                                                      |
+| `vault.renderFingerprint(canvas, position?)` | New vault method. Draws a deterministic identicon derived from `HMAC(hmacKey, 'visual-fingerprint')`. Same passcode → same icon; wrong passcode or phishing page → visually distinct icon.                 |
+| `contextBinding`                             | New config option. `contextBinding.webauthn: true` requires a platform authenticator (TouchID / FaceID / Windows Hello) as a second factor. Enrolled on first unlock; asserted on every subsequent unlock. |
+| `maxUnlockDurationMs`                        | New config option. Absolute vault-open duration ceiling independent of idle-timeout resets.                                                                                                                |
+| `honeyKeys.maxPerBackend`                    | New config option (default: `500`). FIFO eviction cap on the per-backend honey key `Set`. Bounds memory in long-lived high-write sessions.                                                                 |
+| `suspicion.persistScore`                     | New config option (default: `false`). Persists suspicion score across page reloads as an HMAC-signed, decay-adjusted snapshot.                                                                             |
+| `maxValueBytes`                              | New config option. Maximum plaintext value size; writes exceeding the limit throw `VALIDATION_ERROR` before encryption.                                                                                    |
+| `onBeforeWrite`                              | New config option. Write-time validation hook — return `false` to abort the write.                                                                                                                         |
+| Storage prototype proxy                      | `installStorageProxy` now also patches `Storage.prototype.getItem`, catching `Storage.prototype.getItem.call(localStorage, key)` bypass attempts.                                                          |
+| PIN pad `toDataURL` / `toBlob` revocation    | `renderPinPad` overrides both to `''` / no-op immediately after the initial draw, closing the XSS canvas-screenshot exfiltration path. Restored on cleanup.                                                |
+| `vaultId` validation                         | `resolveConfig()` validates against `/^[a-zA-Z0-9_-]{1,64}$/` — non-conforming values throw immediately.                                                                                                   |
+| `lockoutAttempts` clamped to `[3, 20]`       | Values outside this range are silently corrected in `applyFloors()`.                                                                                                                                       |
+| `idleTimeout < 1 s` warning                  | `resolveConfig()` emits `console.warn` — sub-1 s timeouts fire between async adapter operations, causing silent `null` returns.                                                                            |
+| `exportItem` non-optional                    | `exportItem` is now a required method on `IStorageAdapter` — compile-time guarantee on all four adapters.                                                                                                  |
+| Event handler cap                            | `TesseraEmitter` caps handlers per event at 32; excess registrations are silently dropped.                                                                                                                 |
+| `cleanOrphanedSplits` fix                    | IDB compound-key delete was no-oping with only the `key` string; fixed to use the full `[store, key]` compound key.                                                                                        |
 
 ### 0.1.4
 

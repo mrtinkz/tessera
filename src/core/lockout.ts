@@ -1,7 +1,15 @@
 import { TesseraError, TesseraErrorCode } from '../types';
 
-const STORAGE_KEY = 'tessera_lockout';
-const SIG_STORAGE_KEY = 'tessera_lockout_sig';
+// Storage keys are computed per vault. 'default' maps to the legacy key
+// names so existing apps are unaffected.
+function lockoutKey(vaultId = 'default'): string {
+  return vaultId === 'default' ? 'tessera_lockout' : `tessera_${vaultId}_lockout`;
+}
+
+function lockoutSigKey(vaultId = 'default'): string {
+  return vaultId === 'default' ? 'tessera_lockout_sig' : `tessera_${vaultId}_lockout_sig`;
+}
+
 const MAX_ATTEMPTS = 5;
 const BACKOFF_MULTIPLIER = 2;
 
@@ -11,9 +19,9 @@ interface LockoutRecord {
   backoffMs: number;
 }
 
-function readRecord(): LockoutRecord {
+function readRecord(vaultId = 'default'): LockoutRecord {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY);
+    const stored = localStorage.getItem(lockoutKey(vaultId));
     if (stored === null) {
       return { attempts: 0, lockedUntil: null, backoffMs: 1000 };
     }
@@ -23,9 +31,9 @@ function readRecord(): LockoutRecord {
   }
 }
 
-function writeRecord(record: LockoutRecord): void {
+function writeRecord(record: LockoutRecord, vaultId = 'default'): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(record));
+    localStorage.setItem(lockoutKey(vaultId), JSON.stringify(record));
   } catch {
     // Storage quota may be exceeded; swallow.
   }
@@ -51,13 +59,13 @@ function hexToBytes(hex: string): Uint8Array {
  * Signs the current lockout record with the HMAC key and stores the hex
  * signature as `tessera_lockout_sig`. Called after a successful unlock.
  */
-export async function signLockoutRecord(hmacKey: CryptoKey): Promise<void> {
-  const record = readRecord();
+export async function signLockoutRecord(hmacKey: CryptoKey, vaultId = 'default'): Promise<void> {
+  const record = readRecord(vaultId);
   const data = new TextEncoder().encode(JSON.stringify(record));
   const signature = await crypto.subtle.sign('HMAC', hmacKey, data);
   const sigHex = uint8ArrayToHex(new Uint8Array(signature));
   try {
-    localStorage.setItem(SIG_STORAGE_KEY, sigHex);
+    localStorage.setItem(lockoutSigKey(vaultId), sigHex);
   } catch {
     // Best-effort — storage may be unavailable.
   }
@@ -68,25 +76,26 @@ export async function signLockoutRecord(hmacKey: CryptoKey): Promise<void> {
  * Returns `true` if the record is intact (or no prior signature exists),
  * `false` if the record was tampered.
  */
-export async function verifyLockoutRecord(hmacKey: CryptoKey): Promise<boolean> {
+export async function verifyLockoutRecord(
+  hmacKey: CryptoKey,
+  vaultId = 'default',
+): Promise<boolean> {
   let sigHex: string | null = null;
   try {
-    sigHex = localStorage.getItem(SIG_STORAGE_KEY);
+    sigHex = localStorage.getItem(lockoutSigKey(vaultId));
   } catch {
     // Storage unavailable — treat as no prior signature.
   }
 
-  // No prior signature means this is the first unlock (or storage was cleared legitimately).
   if (sigHex === null) return true;
 
-  const record = readRecord();
+  const record = readRecord(vaultId);
   const data = new TextEncoder().encode(JSON.stringify(record));
   try {
     const sigBytes = hexToBytes(sigHex);
     const valid = await crypto.subtle.verify('HMAC', hmacKey, sigBytes, data);
     return valid;
   } catch {
-    // Malformed signature — treat as tampered.
     return false;
   }
 }
@@ -95,12 +104,24 @@ export async function verifyLockoutRecord(hmacKey: CryptoKey): Promise<boolean> 
  * Records a failed `Tessera.unlock()` attempt and, when the threshold is
  * reached, sets a lockout window with exponential backoff.
  *
- * @param maxAttempts - Maximum attempts before lockout fires.
+ * @param maxAttempts     - Maximum attempts before lockout fires.
+ * @param initialBackoffMs - The starting backoff delay in milliseconds for
+ *   the first lockout cycle. Defaults to 1 000 ms. Subsequent cycles double
+ *   from whatever value was stored in the previous cycle.
  *
  * @security Mitigates T8 (on-device brute force).
  */
-export function recordFailedAttempt(maxAttempts: number = MAX_ATTEMPTS): void {
-  const record = readRecord();
+export function recordFailedAttempt(
+  maxAttempts: number = MAX_ATTEMPTS,
+  initialBackoffMs = 1000,
+  vaultId = 'default',
+): void {
+  const record = readRecord(vaultId);
+
+  if (record.attempts === 0 && record.backoffMs === 1000 && initialBackoffMs !== 1000) {
+    record.backoffMs = initialBackoffMs;
+  }
+
   record.attempts += 1;
 
   if (record.attempts >= maxAttempts) {
@@ -108,7 +129,7 @@ export function recordFailedAttempt(maxAttempts: number = MAX_ATTEMPTS): void {
     record.backoffMs *= BACKOFF_MULTIPLIER;
   }
 
-  writeRecord(record);
+  writeRecord(record, vaultId);
 }
 
 /**
@@ -119,8 +140,8 @@ export function recordFailedAttempt(maxAttempts: number = MAX_ATTEMPTS): void {
  *   the lockout window is determined by `recordFailedAttempt`.
  * @throws {TesseraError} `LOCKOUT` while a backoff window is active.
  */
-export function checkLockout(_maxAttempts: number = MAX_ATTEMPTS): void {
-  const record = readRecord();
+export function checkLockout(_maxAttempts: number = MAX_ATTEMPTS, vaultId = 'default'): void {
+  const record = readRecord(vaultId);
 
   if (record.lockedUntil !== null && Date.now() < record.lockedUntil) {
     const remaining = record.lockedUntil - Date.now();
@@ -131,7 +152,7 @@ export function checkLockout(_maxAttempts: number = MAX_ATTEMPTS): void {
   }
 
   if (record.lockedUntil !== null && Date.now() >= record.lockedUntil) {
-    writeRecord({ attempts: 0, lockedUntil: null, backoffMs: record.backoffMs });
+    writeRecord({ attempts: 0, lockedUntil: null, backoffMs: record.backoffMs }, vaultId);
   }
 }
 
@@ -139,8 +160,8 @@ export function checkLockout(_maxAttempts: number = MAX_ATTEMPTS): void {
  * Resets the lockout counter and clears any active backoff window.
  * Called by `Tessera.unlock()` after a successful unlock.
  */
-export function resetLockout(): void {
-  writeRecord({ attempts: 0, lockedUntil: null, backoffMs: 1000 });
+export function resetLockout(vaultId = 'default'): void {
+  writeRecord({ attempts: 0, lockedUntil: null, backoffMs: 1000 }, vaultId);
 }
 
 /**
@@ -149,8 +170,11 @@ export function resetLockout(): void {
  * @param maxAttempts - The configured lockout threshold.
  * @returns A non-negative integer; `0` means the lockout threshold is reached.
  */
-export function getRemainingAttempts(maxAttempts: number = MAX_ATTEMPTS): number {
-  const record = readRecord();
+export function getRemainingAttempts(
+  maxAttempts: number = MAX_ATTEMPTS,
+  vaultId = 'default',
+): number {
+  const record = readRecord(vaultId);
   return Math.max(0, maxAttempts - record.attempts);
 }
 
@@ -164,15 +188,21 @@ export function getRemainingAttempts(maxAttempts: number = MAX_ATTEMPTS): number
  * @security Mitigates T8 — removes all encrypted vault data so an attacker
  *   cannot run an offline attack against the stored ciphertext.
  */
-export function performWipe(): void {
+export function performWipe(vaultId = 'default'): void {
   // Wipe localStorage and sessionStorage but preserve the lockout record so
   // that repeated attempts after a wipe are still blocked.
   try {
-    const lockoutRecord = localStorage.getItem(STORAGE_KEY);
+    const key = lockoutKey(vaultId);
+    const sigKey = lockoutSigKey(vaultId);
+    const lockoutRecord = localStorage.getItem(key);
+    const lockoutSig = localStorage.getItem(sigKey);
     localStorage.clear();
     sessionStorage.clear();
     if (lockoutRecord !== null) {
-      localStorage.setItem(STORAGE_KEY, lockoutRecord);
+      localStorage.setItem(key, lockoutRecord);
+    }
+    if (lockoutSig !== null) {
+      localStorage.setItem(sigKey, lockoutSig);
     }
   } catch {
     // Best-effort — storage may be unavailable.
@@ -190,9 +220,10 @@ export function performWipe(): void {
     // Best-effort — document may be unavailable (e.g. non-browser context).
   }
 
-  // Delete the tessera IndexedDB database.
+  // Delete the vault's IndexedDB database.
+  const dbName = vaultId === 'default' ? 'tessera_vault' : `tessera_vault_${vaultId}`;
   try {
-    indexedDB.deleteDatabase('tessera_vault');
+    indexedDB.deleteDatabase(dbName);
   } catch {
     // Best-effort — IndexedDB may be unavailable.
   }

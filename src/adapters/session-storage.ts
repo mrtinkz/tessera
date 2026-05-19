@@ -7,6 +7,9 @@ import {
   type SensitivityLevel,
   type SuspicionAction,
   type HoneyKeyManagerIsh,
+  TesseraError,
+  TesseraErrorCode,
+  CLAIM_TOKEN_PREFIX,
 } from '../types';
 import { type KeySession } from '../core/session';
 import { encryptWithSalt, decryptFull, generateHoneyCiphertext } from '../core/crypto';
@@ -21,7 +24,7 @@ import { SENSITIVITY_DEFAULTS } from '../types';
 
 const DEFAULT_ON_SUSPICION: SuspicionAction = 'wipe';
 const SPLIT_PREFIX = 'split:';
-const CLAIM_PREFIX = 'ref:';
+// CLAIM_TOKEN_PREFIX ('ref:') is the canonical constant from types.ts — no local duplicate.
 
 export class SessionStorageAdapter implements IStorageAdapter {
   private honeyManager: HoneyKeyManagerIsh | null = null;
@@ -89,7 +92,7 @@ export class SessionStorageAdapter implements IStorageAdapter {
       return this.handleSplitRead(cryptoKey, raw, key, 'session', storageKey);
     }
 
-    if (raw.startsWith(CLAIM_PREFIX)) {
+    if (raw.startsWith(CLAIM_TOKEN_PREFIX)) {
       return this.handleClaimRead(cryptoKey, raw, key, 'session');
     }
 
@@ -101,31 +104,69 @@ export class SessionStorageAdapter implements IStorageAdapter {
     const cryptoKey = this.session.getKey();
     const storageKey = await this.session.rotateKeyName(key);
 
+    if (this.config.maxValueBytes !== undefined) {
+      const byteLength = new TextEncoder().encode(value).byteLength;
+      if (byteLength > this.config.maxValueBytes) {
+        throw new TesseraError(
+          TesseraErrorCode.VALIDATION_ERROR,
+          `Value for '${key}' is ${byteLength} bytes, exceeds maxValueBytes (${this.config.maxValueBytes}).`,
+        );
+      }
+    }
+    if (this.config.onBeforeWrite !== undefined && !this.config.onBeforeWrite(key, value)) {
+      throw new TesseraError(
+        TesseraErrorCode.VALIDATION_ERROR,
+        `Write for key '${key}' was rejected by onBeforeWrite.`,
+      );
+    }
+
     const mode = options?.mode ?? 'direct';
 
     if (mode === 'split') {
       await this.handleSplitWrite(cryptoKey, value, key, storageKey, options);
       this.keyRegistry.add(key);
-      this.scheduleHoneyKeys('session');
+      this.session.touch(); // reset idle timer on split writes
+      await this.writeHoneyKeysInterleaved('session', storageKey, cryptoKey);
       return;
     }
 
     if (mode === 'claim') {
       await this.handleClaimWrite(cryptoKey, value, key, storageKey, options);
       this.keyRegistry.add(key);
-      this.scheduleHoneyKeys('session');
+      this.session.touch(); // reset idle timer on claim writes
+      await this.writeHoneyKeysInterleaved('session', storageKey, cryptoKey);
       return;
     }
 
     const sensitivity = options?.sensitivity ?? this.config.defaultSensitivity ?? 'medium';
     const metadata = this.buildMeta(sensitivity, options);
 
-    const packed = await this.packageValue(cryptoKey, value, metadata);
-    this.rawSetItem(storageKey, packed);
+    // Prepare honey keys and generate all ciphertexts in parallel with the real key.
+    const honeyKeys = this.prepareHoneyKeys('session');
+    const allCts = await Promise.all([
+      this.packageValue(cryptoKey, value, metadata),
+      ...honeyKeys.map(() => generateHoneyCiphertext(cryptoKey)),
+    ]);
+    const packed = allCts[0]!;
+    const honeyCts = allCts.slice(1);
+
+    // Write real key and honey keys in random order — no fixed creation pattern.
+    const writes: Array<[string, string]> = [
+      [storageKey, packed],
+      ...honeyKeys.map((hk, i) => [hk, honeyCts[i]!] as [string, string]),
+    ];
+    for (let i = writes.length - 1; i > 0; i--) {
+      const j = crypto.getRandomValues(new Uint8Array(1))[0]! % (i + 1);
+      // eslint-disable-next-line security/detect-object-injection
+      [writes[i]!, writes[j]!] = [writes[j]!, writes[i]!];
+    }
+    for (const [k, v] of writes) {
+      this.rawSetItem(k, v);
+    }
+
     this.keyRegistry.add(key);
     this.sensitivityRegistry.set(key, sensitivity);
     this.session.touch();
-    this.scheduleHoneyKeys('session');
   }
 
   async removeItem(key: string): Promise<void> {
@@ -134,7 +175,7 @@ export class SessionStorageAdapter implements IStorageAdapter {
     if (storageKey === null) return;
     const raw = this.rawGetItem(storageKey);
 
-    if (raw?.startsWith(CLAIM_PREFIX) && this.idb) {
+    if (raw?.startsWith(CLAIM_TOKEN_PREFIX) && this.idb) {
       const token = extractTokenId(raw);
       await this.idb.remove('_claims', token).catch(() => {});
     }
@@ -226,7 +267,7 @@ export class SessionStorageAdapter implements IStorageAdapter {
         if (this.session.getKeySafe() === null) return;
         if (this.honeyManager?.isHoney('session', storageKey)) continue;
         const raw = this.rawGetItem(storageKey);
-        if (!raw || raw.startsWith(SPLIT_PREFIX) || raw.startsWith(CLAIM_PREFIX)) continue;
+        if (!raw || raw.startsWith(SPLIT_PREFIX) || raw.startsWith(CLAIM_TOKEN_PREFIX)) continue;
         const dotIdx = raw.indexOf('.');
         if (dotIdx === -1) continue;
         const metaResult = await decryptFull(cryptoKey, raw.slice(0, dotIdx));
@@ -283,7 +324,7 @@ export class SessionStorageAdapter implements IStorageAdapter {
     const raw = this.rawGetItem(storageKey);
     if (raw === null) return null;
 
-    if (raw.startsWith(SPLIT_PREFIX) || raw.startsWith(CLAIM_PREFIX)) return null;
+    if (raw.startsWith(SPLIT_PREFIX) || raw.startsWith(CLAIM_TOKEN_PREFIX)) return null;
 
     const dotIdx = raw.indexOf('.');
     if (dotIdx === -1) return null;
@@ -378,6 +419,16 @@ export class SessionStorageAdapter implements IStorageAdapter {
     storageKey: string,
     options?: StorageItemOptions,
   ): Promise<void> {
+    // IDB is required for split mode — share B cannot be stored without it.
+    // Throwing here prevents a silent write that would appear to succeed but is
+    // permanently unreadable on getItem.
+    if (!this.idb) {
+      throw new TesseraError(
+        TesseraErrorCode.UNSUPPORTED_ENV,
+        'split mode requires IndexedDB. IDB is unavailable in this environment (private/incognito mode or security policy).',
+      );
+    }
+
     const { shareA, shareB } = splitValue(value);
     const shareABase64 = shareToBase64(shareA);
 
@@ -432,15 +483,21 @@ export class SessionStorageAdapter implements IStorageAdapter {
     storageKey: string,
     options?: StorageItemOptions,
   ): Promise<void> {
-    const token = generateClaimToken();
-    this.rawSetItem(storageKey, `${CLAIM_PREFIX}${token}`);
-
-    if (this.idb) {
-      const sensitivity = options?.sensitivity ?? this.config.defaultSensitivity ?? 'medium';
-      const meta = this.buildMeta(sensitivity, options);
-      const packed = await this.packageValue(cryptoKey, value, meta);
-      await this.idb.put('_claims', token, packed);
+    // IDB is required for claim mode — the actual value lives in IDB.
+    if (!this.idb) {
+      throw new TesseraError(
+        TesseraErrorCode.UNSUPPORTED_ENV,
+        'claim mode requires IndexedDB. IDB is unavailable in this environment (private/incognito mode or security policy).',
+      );
     }
+
+    const token = generateClaimToken();
+    this.rawSetItem(storageKey, `${CLAIM_TOKEN_PREFIX}${token}`);
+
+    const sensitivity = options?.sensitivity ?? this.config.defaultSensitivity ?? 'medium';
+    const meta = this.buildMeta(sensitivity, options);
+    const packed = await this.packageValue(cryptoKey, value, meta);
+    await this.idb.put('_claims', token, packed);
   }
 
   private async handleClaimRead(
@@ -449,7 +506,7 @@ export class SessionStorageAdapter implements IStorageAdapter {
     key: string,
     _backend: string,
   ): Promise<string | null> {
-    const token = raw.slice(CLAIM_PREFIX.length);
+    const token = raw.slice(CLAIM_TOKEN_PREFIX.length);
     /* v8 ignore next */
     if (!token || !this.idb) return null;
 
@@ -528,7 +585,11 @@ export class SessionStorageAdapter implements IStorageAdapter {
         softThresholdMs: metadata.halfLifeSoft,
         elapsedMs: Date.now() - metadata.writeTime,
       });
-      return null;
+      // Throw typed error so callers get an explicit signal.
+      throw new TesseraError(
+        TesseraErrorCode.RECONFIRMATION_REQUIRED,
+        `Key '${keyAlias}' requires reconfirmation before it can be read.`,
+      );
     }
 
     const valueResult = await decryptFull(cryptoKey, valueB64);
@@ -578,29 +639,32 @@ export class SessionStorageAdapter implements IStorageAdapter {
     this.rawSetItem(storageKey, `${encryptedMeta}.${valueB64}`);
   }
 
-  private scheduleHoneyKeys(backend: string): void {
+  private prepareHoneyKeys(backend: string): string[] {
     const mgr = this.honeyManager as HoneyKeyManager | null;
-    if (!mgr?.isEnabled) return;
+    if (!mgr?.isEnabled) return [];
     const needed = this.config.honeyKeys.count - mgr.allKeys(backend).length;
-    if (needed <= 0) return;
+    if (needed <= 0) return [];
     const existingAliases = [...this.keyRegistry];
     const honeyStorageKeys = mgr.generateHoneyKeys(backend, existingAliases, needed);
     for (const storageKey of honeyStorageKeys) {
       mgr.assignDecoyAlias(backend, storageKey, existingAliases);
-      const delay = 50 + Math.floor(Math.random() * 1950);
-      setTimeout(() => {
-        void this.writeHoneyKey(storageKey);
-      }, delay);
     }
+    return honeyStorageKeys;
   }
 
-  private async writeHoneyKey(storageKey: string): Promise<void> {
-    const cryptoKey = this.session.getKeySafe();
-    if (!cryptoKey) return;
-    const ct = await generateHoneyCiphertext(cryptoKey);
-    // Don't write if wipeAll cleared the registry (e.g. lockdown fired during crypto)
-    if (!this.honeyManager?.isHoney('session', storageKey)) return;
-    this.rawSetItem(storageKey, ct);
+  /** For split/claim modes: honey keys have no natural interleave point, so write them after. */
+  private async writeHoneyKeysInterleaved(
+    backend: string,
+    _realStorageKey: string,
+    cryptoKey: CryptoKey,
+  ): Promise<void> {
+    const honeyKeys = this.prepareHoneyKeys(backend);
+    if (honeyKeys.length === 0) return;
+    const honeyCts = await Promise.all(honeyKeys.map(() => generateHoneyCiphertext(cryptoKey)));
+    for (const [i, hk] of honeyKeys.entries()) {
+      // eslint-disable-next-line security/detect-object-injection
+      this.rawSetItem(hk, honeyCts[i]!);
+    }
   }
 
   private async applyOnSuspicion(

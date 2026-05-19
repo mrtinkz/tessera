@@ -1,24 +1,25 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-
-const identityDecorator = (target: unknown): unknown => target;
-const angularDecorator = (): typeof identityDecorator => identityDecorator;
+import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('@angular/core', () => ({
-  Injectable: angularDecorator,
-  NgModule: angularDecorator,
+  makeEnvironmentProviders: (providers: unknown[]) => ({ providers }),
+  EnvironmentProviders: class {},
 }));
 
 describe('Angular framework adapter — TesseraService', () => {
-  beforeEach(() => {});
-
   it('exports TesseraService class', async () => {
     const { TesseraService } = await import('../../src/framework/angular/index');
     expect(typeof TesseraService).toBe('function');
   });
 
-  it('exports TesseraModule class', async () => {
+  it('exports TesseraModule object with forRoot()', async () => {
     const { TesseraModule } = await import('../../src/framework/angular/index');
-    expect(typeof TesseraModule).toBe('function');
+    expect(typeof TesseraModule).toBe('object');
+    expect(typeof TesseraModule.forRoot).toBe('function');
+  });
+
+  it('exports provideTessera function', async () => {
+    const { provideTessera } = await import('../../src/framework/angular/index');
+    expect(typeof provideTessera).toBe('function');
   });
 
   it('TesseraService initialises with isLocked true and vault null', async () => {
@@ -31,7 +32,6 @@ describe('Angular framework adapter — TesseraService', () => {
   it('TesseraService.lock() sets isLocked to true and vault to null', async () => {
     const { TesseraService } = await import('../../src/framework/angular/index');
     const svc = new TesseraService();
-    // Inject a fake vault
     const fakeVault = { lock: vi.fn(), isLocked: () => true };
     (svc as unknown as { vault: unknown }).vault = fakeVault;
     svc.isLocked = false;
@@ -41,11 +41,16 @@ describe('Angular framework adapter — TesseraService', () => {
     expect(svc.vault).toBeNull();
   });
 
-  it('TesseraModule.forRoot() returns an object with ngModule and providers', async () => {
-    const { TesseraModule } = await import('../../src/framework/angular/index');
+  it('provideTessera() wraps TesseraService via makeEnvironmentProviders', async () => {
+    const { provideTessera, TesseraService } = await import('../../src/framework/angular/index');
+    const result = provideTessera() as unknown as { providers: unknown[] };
+    expect(result.providers).toContain(TesseraService);
+  });
+
+  it('TesseraModule.forRoot() returns providers array containing TesseraService', async () => {
+    const { TesseraModule, TesseraService } = await import('../../src/framework/angular/index');
     const result = TesseraModule.forRoot({ iterations: 310_000 });
-    expect(result).toHaveProperty('ngModule');
-    expect(result).toHaveProperty('providers');
     expect(Array.isArray(result.providers)).toBe(true);
+    expect(result.providers).toContain(TesseraService);
   });
 });

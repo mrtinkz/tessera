@@ -20,7 +20,7 @@ function assertBrowserEnvironment(): void {
   }
 }
 
-function validatePasscode(passcode: string): void {
+export function validatePasscode(passcode: string): void {
   if (passcode.length < 6) {
     throw new TesseraError(
       TesseraErrorCode.INVALID_PASSCODE,
@@ -43,9 +43,14 @@ function concatBuffers(a: Uint8Array, b: Uint8Array): Uint8Array {
 }
 
 function uint8ArrayToBase64(bytes: Uint8Array): string {
+  // Build binary string in 32 KiB chunks to avoid O(n²) string concat AND
+  // the call-stack overflow that `String.fromCharCode(...largeArray)` causes for
+  // arrays > ~65 536 elements. Each chunk is one allocation; concatenating a handful
+  // of small strings is O(n) overall.
+  const CHUNK = 0x80_00; // 32 768 bytes per call
   let binary = '';
-  for (const byte of bytes) {
-    binary += String.fromCodePoint(byte);
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCodePoint(...bytes.subarray(i, i + CHUNK));
   }
   return btoa(binary);
 }

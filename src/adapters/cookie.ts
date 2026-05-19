@@ -7,6 +7,9 @@ import {
   type SensitivityLevel,
   type SuspicionAction,
   type HoneyKeyManagerIsh,
+  CLAIM_TOKEN_PREFIX,
+  TesseraError,
+  TesseraErrorCode,
 } from '../types';
 import { type KeySession } from '../core/session';
 import { encryptWithSalt, decryptFull, generateHoneyCiphertext } from '../core/crypto';
@@ -19,7 +22,7 @@ import { generateClaimToken, extractTokenId } from '../storage/claim';
 import { SENSITIVITY_DEFAULTS } from '../types';
 
 const DEFAULT_ON_SUSPICION: SuspicionAction = 'wipe';
-const CLAIM_PREFIX = 'ref:';
+// CLAIM_TOKEN_PREFIX ('ref:') is the canonical constant from types.ts — no local duplicate.
 
 export class CookieAdapter implements ICookieAdapter {
   private idb: IndexedDbAdapter | null = null;
@@ -56,12 +59,24 @@ export class CookieAdapter implements ICookieAdapter {
       }
     }
 
+    // Decoy alias: a developer-visible fake name that maps to a honey storage key.
+    if (this.honeyManager?.isDecoyAlias('cookie', name)) {
+      this.suspicion?.recordHoneyHit('cookie');
+      return null;
+    }
+
     const raw = this.readRaw(name);
     if (raw === null) return null;
 
+    // Storage-level honey check: catches direct access via the raw t_<hex> cookie name.
+    if (this.honeyManager?.isHoney('cookie', name)) {
+      this.suspicion?.recordHoneyHit('cookie');
+      return null;
+    }
+
     const value = decodeURIComponent(raw);
 
-    if (value.startsWith(CLAIM_PREFIX)) {
+    if (value.startsWith(CLAIM_TOKEN_PREFIX)) {
       return this.handleClaimRead(cryptoKey, value, name);
     }
 
@@ -82,13 +97,29 @@ export class CookieAdapter implements ICookieAdapter {
     options?: CookieOptions & StorageItemOptions,
   ): Promise<void> {
     const cryptoKey = this.session.getKey();
-    this.cookieNames.add(name);
 
+    if (this.config.maxValueBytes !== undefined) {
+      const byteLength = new TextEncoder().encode(value).byteLength;
+      if (byteLength > this.config.maxValueBytes) {
+        throw new TesseraError(
+          TesseraErrorCode.VALIDATION_ERROR,
+          `Value for '${name}' is ${byteLength} bytes, exceeds maxValueBytes (${this.config.maxValueBytes}).`,
+        );
+      }
+    }
+    if (this.config.onBeforeWrite !== undefined && !this.config.onBeforeWrite(name, value)) {
+      throw new TesseraError(
+        TesseraErrorCode.VALIDATION_ERROR,
+        `Write for key '${name}' was rejected by onBeforeWrite.`,
+      );
+    }
+
+    this.cookieNames.add(name);
     const mode = options?.mode ?? 'direct';
 
     if (mode === 'claim') {
       await this.handleClaimWrite(cryptoKey, value, name, options);
-      this.scheduleHoneyKeys();
+      await this.writeHoneyKeysInterleaved(cryptoKey);
       return;
     }
 
@@ -96,35 +127,57 @@ export class CookieAdapter implements ICookieAdapter {
     const metadata = this.buildMeta(sensitivity, options);
     this.sensitivityRegistry.set(name, sensitivity);
 
-    const packed = await this.packageValue(cryptoKey, value, metadata);
+    // Prepare honey keys and generate all ciphertexts in parallel with the real key.
+    const honeyKeys = this.prepareHoneyKeys();
+    const allCts = await Promise.all([
+      this.packageValue(cryptoKey, value, metadata),
+      ...honeyKeys.map(() => generateHoneyCiphertext(cryptoKey)),
+    ]);
+    const packed = allCts[0]!;
+    const honeyCts = allCts.slice(1);
+
+    // Write real cookie. Honey cookies use t_-prefixed names (already distinguishable by name)
+    // but we still randomise write order to avoid a fixed timing pattern.
+    const honeyWrites = honeyKeys.map((hk, i) => [hk, honeyCts[i]!] as [string, string]);
+    for (let i = honeyWrites.length - 1; i > 0; i--) {
+      const j = crypto.getRandomValues(new Uint8Array(1))[0]! % (i + 1);
+      // eslint-disable-next-line security/detect-object-injection
+      [honeyWrites[i]!, honeyWrites[j]!] = [honeyWrites[j]!, honeyWrites[i]!];
+    }
+    // Random insertion point for the real cookie among honey cookies.
+    const pos =
+      honeyWrites.length === 0
+        ? 0
+        : crypto.getRandomValues(new Uint8Array(1))[0]! % (honeyWrites.length + 1);
+    for (let i = 0; i < pos; i++) this.writeCookieRaw(honeyWrites[i]![0], honeyWrites[i]![1]);
     this.writeCookie(name, packed, options);
+    for (let i = pos; i < honeyWrites.length; i++)
+      this.writeCookieRaw(honeyWrites[i]![0], honeyWrites[i]![1]);
+
     this.session.touch();
-    this.scheduleHoneyKeys();
   }
 
-  private scheduleHoneyKeys(): void {
+  private prepareHoneyKeys(): string[] {
     const mgr = this.honeyManager as HoneyKeyManager | null;
-    if (!mgr?.isEnabled) return;
+    if (!mgr?.isEnabled) return [];
     const needed = this.config.honeyKeys.count - mgr.allKeys('cookie').length;
-    if (needed <= 0) return;
+    if (needed <= 0) return [];
     const existingAliases = [...this.cookieNames];
     const honeyStorageKeys = mgr.generateHoneyKeys('cookie', existingAliases, needed);
     for (const storageKey of honeyStorageKeys) {
       mgr.assignDecoyAlias('cookie', storageKey, existingAliases);
-      const delay = 50 + Math.floor(Math.random() * 1950);
-      setTimeout(() => {
-        void this.writeHoneyCookie(storageKey);
-      }, delay);
     }
+    return honeyStorageKeys;
   }
 
-  private async writeHoneyCookie(storageKey: string): Promise<void> {
-    const cryptoKey = this.session.getKeySafe();
-    if (!cryptoKey) return;
-    const ct = await generateHoneyCiphertext(cryptoKey);
-    // Don't write if wipeAll cleared the registry (e.g. lockdown fired during crypto)
-    if (!this.honeyManager?.isHoney('cookie', storageKey)) return;
-    this.writeCookieRaw(storageKey, ct);
+  /** For claim mode: write honey cookies after the real write completes. */
+  private async writeHoneyKeysInterleaved(cryptoKey: CryptoKey): Promise<void> {
+    const honeyKeys = this.prepareHoneyKeys();
+    if (honeyKeys.length === 0) return;
+    const honeyCts = await Promise.all(honeyKeys.map(() => generateHoneyCiphertext(cryptoKey)));
+    for (const [i, hk] of honeyKeys.entries()) {
+      this.writeCookieRaw(hk, honeyCts[i]!);
+    }
   }
 
   async remove(name: string): Promise<void> {
@@ -132,7 +185,7 @@ export class CookieAdapter implements ICookieAdapter {
 
     if (raw && this.idb) {
       const value = decodeURIComponent(raw);
-      if (value.startsWith(CLAIM_PREFIX)) {
+      if (value.startsWith(CLAIM_TOKEN_PREFIX)) {
         const token = extractTokenId(value);
         await this.idb.remove('_claims', token).catch(() => {});
       }
@@ -157,7 +210,7 @@ export class CookieAdapter implements ICookieAdapter {
     options?: CookieOptions & StorageItemOptions,
   ): Promise<void> {
     const token = generateClaimToken();
-    this.writeCookie(name, `${CLAIM_PREFIX}${token}`, options);
+    this.writeCookie(name, `${CLAIM_TOKEN_PREFIX}${token}`, options);
 
     if (this.idb) {
       const sensitivity = options?.sensitivity ?? this.config.defaultSensitivity ?? 'medium';
@@ -172,7 +225,7 @@ export class CookieAdapter implements ICookieAdapter {
     value: string,
     name: string,
   ): Promise<string | null> {
-    const token = value.slice(CLAIM_PREFIX.length);
+    const token = value.slice(CLAIM_TOKEN_PREFIX.length);
     if (!token || !this.idb) return null;
 
     const packed = (await this.idb.get('_claims', token)) as string | undefined;
@@ -249,7 +302,11 @@ export class CookieAdapter implements ICookieAdapter {
         softThresholdMs: metadata.halfLifeSoft,
         elapsedMs: Date.now() - metadata.writeTime,
       });
-      return null;
+      // Throw typed error so callers get an explicit signal.
+      throw new TesseraError(
+        TesseraErrorCode.RECONFIRMATION_REQUIRED,
+        `Key '${keyAlias}' requires reconfirmation before it can be read.`,
+      );
     }
 
     const valueResult = await decryptFull(cryptoKey, valueB64);
@@ -314,11 +371,16 @@ export class CookieAdapter implements ICookieAdapter {
       parts.push(`domain=${options.domain}`);
     }
 
-    if (options?.sameSite !== undefined) {
-      parts.push(`SameSite=${options.sameSite}`);
-    }
+    // Default SameSite to 'Strict' — tessera cookies are never needed on cross-site
+    // requests. Developer can override by passing options.sameSite explicitly.
+    const effectiveSameSite = options?.sameSite ?? 'Strict';
+    parts.push(`SameSite=${effectiveSameSite}`);
 
-    if (options?.secure === true) {
+    // Auto-apply Secure on HTTPS pages. The Secure flag only controls browser
+    // HTTP transmission — it has zero effect on document.cookie reads, so tessera's
+    // decrypt path is unaffected. Developer can override via options.secure.
+    const effectiveSecure = options?.secure ?? globalThis.location?.protocol === 'https:';
+    if (effectiveSecure) {
       parts.push('Secure');
     }
 
@@ -326,7 +388,11 @@ export class CookieAdapter implements ICookieAdapter {
   }
 
   private writeCookieRaw(key: string, value: string): void {
-    document.cookie = `${encodeURIComponent(key)}=${encodeURIComponent(value)}; path=/`;
+    // Honey cookies receive the same security defaults as real cookies
+    // so they are indistinguishable in size, flags, and transmission behaviour.
+    const sameSite = 'Strict';
+    const secureFlag = globalThis.location?.protocol === 'https:' ? '; Secure' : '';
+    document.cookie = `${encodeURIComponent(key)}=${encodeURIComponent(value)}; path=/${secureFlag}; SameSite=${sameSite}`;
   }
 
   private writeCookieExpired(key: string): void {
@@ -393,7 +459,7 @@ export class CookieAdapter implements ICookieAdapter {
         const raw = this.readRaw(name);
         if (!raw) continue;
         const value = decodeURIComponent(raw);
-        if (value.startsWith(CLAIM_PREFIX)) continue;
+        if (value.startsWith(CLAIM_TOKEN_PREFIX)) continue;
         const dotIdx = value.indexOf('.');
         if (dotIdx === -1) continue;
         const metaResult = await decryptFull(cryptoKey, value.slice(0, dotIdx));

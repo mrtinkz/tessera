@@ -149,14 +149,15 @@ describe('LocalStorageAdapter', () => {
     expect(result).toBeNull();
   });
 
-  // halfLife soft: set a 1ms soft half-life without a reconfirm key → null
-  it('should return null when halfLife.soft has elapsed and no reconfirm key', async () => {
+  // halfLife soft: set a 1ms soft half-life without a reconfirm key → throws RECONFIRMATION_REQUIRED
+  it('should throw RECONFIRMATION_REQUIRED when halfLife.soft has elapsed and no reconfirm key', async () => {
     const adapter = new LocalStorageAdapter(resolveConfig(), session, new TesseraEmitter());
     await adapter.setItem('hl-soft', 'v', { halfLife: { soft: 1 } });
     await new Promise((r) => setTimeout(r, 10));
     // no reconfirm key set on session
-    const result = await adapter.getItem('hl-soft');
-    expect(result).toBeNull();
+    await expect(adapter.getItem('hl-soft')).rejects.toMatchObject({
+      code: 'RECONFIRMATION_REQUIRED',
+    });
   });
 
   it('should emit reconfirmation-required event on soft half-life', async () => {
@@ -166,7 +167,12 @@ describe('LocalStorageAdapter', () => {
     events.on('reconfirmation-required', handler);
     await adapter.setItem('hl-soft-ev', 'v', { halfLife: { soft: 1 } });
     await new Promise((r) => setTimeout(r, 10));
-    await adapter.getItem('hl-soft-ev');
+    // getItem now throws after emitting the event
+    try {
+      await adapter.getItem('hl-soft-ev');
+    } catch {
+      /* expected RECONFIRMATION_REQUIRED */
+    }
     expect(handler).toHaveBeenCalled();
   });
 
@@ -548,12 +554,8 @@ describe('LocalStorageAdapter', () => {
     const adapter = new LocalStorageAdapter(config, session, new TesseraEmitter());
     adapter.setHoneyManager(mgr);
 
-    vi.useFakeTimers();
     await adapter.setItem('low-key', 'lo', { sensitivity: 'low' });
     await adapter.setItem('high-key', 'hi', { sensitivity: 'high' });
-    vi.runAllTimers();
-    vi.useRealTimers();
-    await new Promise((r) => setTimeout(r, 100));
     const honeyKeysBefore = mgr.allKeys('local');
     expect(honeyKeysBefore.length).toBe(2);
 
@@ -591,11 +593,7 @@ describe('LocalStorageAdapter', () => {
     const mgr1 = new HoneyKeyManager(config);
     const adapter1 = new LocalStorageAdapter(config, session, new TesseraEmitter());
     adapter1.setHoneyManager(mgr1);
-    vi.useFakeTimers();
     await adapter1.setItem('persist', 'still-here', { sensitivity: 'low' });
-    vi.advanceTimersByTime(2000);
-    vi.useRealTimers();
-    await new Promise((r) => setTimeout(r, 100));
     const orphanKeys = mgr1.allKeys('local');
     expect(orphanKeys.length).toBe(2);
 
@@ -628,11 +626,7 @@ describe('LocalStorageAdapter', () => {
     const adapter = new LocalStorageAdapter(config, session, new TesseraEmitter());
     adapter.setHoneyManager(mgr);
 
-    vi.useFakeTimers();
     await adapter.setItem('live-key', 'val');
-    vi.runAllTimers();
-    vi.useRealTimers();
-    await new Promise((r) => setTimeout(r, 100));
     const liveHoneyKeys = mgr.allKeys('local');
     expect(liveHoneyKeys.length).toBe(2);
 
@@ -699,5 +693,70 @@ describe('LocalStorageAdapter', () => {
     expect(exported).toBeNull();
     expect(honeyHits).toBe(1);
     suspicion.destroy();
+  });
+
+  // ── P1: exportItem is a required method (not optional) ────────────────────────
+
+  it('exportItem is defined and callable on the adapter (P1)', async () => {
+    const adapter = new LocalStorageAdapter(resolveConfig(), session, new TesseraEmitter());
+    // The method must exist (not optional) — call it for a missing key
+    expect(typeof adapter.exportItem).toBe('function');
+    const result = await adapter.exportItem('nonexistent');
+    expect(result).toBeNull();
+  });
+
+  // ── P3: maxValueBytes and onBeforeWrite validation ────────────────────────────
+
+  it('throws VALIDATION_ERROR when value exceeds maxValueBytes (P3)', async () => {
+    const config = resolveConfig({ maxValueBytes: 5 });
+    const adapter = new LocalStorageAdapter(config, session, new TesseraEmitter());
+    await expect(adapter.setItem('k', 'this-is-longer-than-5-bytes')).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+    });
+  });
+
+  it('allows write when value is within maxValueBytes (P3)', async () => {
+    const config = resolveConfig({ maxValueBytes: 1000 });
+    const adapter = new LocalStorageAdapter(config, session, new TesseraEmitter());
+    await expect(adapter.setItem('k', 'ok')).resolves.not.toThrow();
+    expect(await adapter.getItem('k')).toBe('ok');
+  });
+
+  it('throws VALIDATION_ERROR when onBeforeWrite returns false (P3)', async () => {
+    const config = resolveConfig({ onBeforeWrite: (_k, _v) => false });
+    const adapter = new LocalStorageAdapter(config, session, new TesseraEmitter());
+    await expect(adapter.setItem('blocked', 'value')).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+    });
+  });
+
+  it('allows write when onBeforeWrite returns true (P3)', async () => {
+    const calls: string[] = [];
+    const config = resolveConfig({
+      onBeforeWrite: (k) => {
+        calls.push(k);
+        return true;
+      },
+    });
+    const adapter = new LocalStorageAdapter(config, session, new TesseraEmitter());
+    await adapter.setItem('mykey', 'val');
+    expect(calls).toContain('mykey');
+    expect(await adapter.getItem('mykey')).toBe('val');
+  });
+
+  it('onBeforeWrite receives the pre-rotation alias and plaintext value (P3)', async () => {
+    let capturedKey = '';
+    let capturedValue = '';
+    const config = resolveConfig({
+      onBeforeWrite: (k, v) => {
+        capturedKey = k;
+        capturedValue = v;
+        return true;
+      },
+    });
+    const adapter = new LocalStorageAdapter(config, session, new TesseraEmitter());
+    await adapter.setItem('aliasKey', 'plainValue');
+    expect(capturedKey).toBe('aliasKey');
+    expect(capturedValue).toBe('plainValue');
   });
 });
