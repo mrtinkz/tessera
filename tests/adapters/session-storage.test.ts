@@ -418,7 +418,7 @@ describe('SessionStorageAdapter', () => {
 
     await adapter.setItem('low-key', 'lo', { sensitivity: 'low' });
     await adapter.setItem('high-key', 'hi', { sensitivity: 'high' });
-    expect(mgr.allKeys('session').length).toBe(2);
+    expect(mgr.allKeys('session').length).toBe(4);
 
     const tKeysBefore = Object.keys(sessionStorage).filter((k) => k.startsWith('t_'));
     expect(tKeysBefore.length).toBeGreaterThanOrEqual(3);
@@ -474,7 +474,7 @@ describe('SessionStorageAdapter', () => {
   });
 
   // addHoneyKeys: needed <= 0 branch (honey manager already has enough keys for the backend)
-  it('should skip honey key generation when needed count is already satisfied', async () => {
+  it('should generate new honey keys on every set, accumulating per write', async () => {
     const config = resolveConfig({ honeyKeys: { count: 2 } } as Parameters<
       typeof resolveConfig
     >[0]);
@@ -483,15 +483,13 @@ describe('SessionStorageAdapter', () => {
     const adapter = new SessionStorageAdapter(config, session, new TesseraEmitter());
     adapter.setHoneyManager(mgr);
 
-    // First setItem: generates 2 honey keys (needed = 2 - 0 = 2)
+    // First setItem: generates 2 honey keys
     await adapter.setItem('hk-first', 'v1');
-    const keysAfterFirst = mgr.allKeys('session').length;
-    expect(keysAfterFirst).toBe(2);
-
-    // Second setItem: needed = 2 - 2 = 0 → takes the 'needed <= 0' early return path
-    await adapter.setItem('hk-second', 'v2');
-    // Honey key count should remain 2 (no new keys generated)
     expect(mgr.allKeys('session').length).toBe(2);
+
+    // Second setItem: generates 2 more honey keys (cumulative: 4 total)
+    await adapter.setItem('hk-second', 'v2');
+    expect(mgr.allKeys('session').length).toBe(4);
   });
 
   // claim mode without idb: F-37 fix — now throws UNSUPPORTED_ENV instead of silently skipping

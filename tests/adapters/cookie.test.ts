@@ -435,7 +435,7 @@ describe('CookieAdapter', () => {
     // Real cookies use developer names (low-c, high-c), honey keys use t_-prefixed names
     await adapter.set('low-c', 'lo', { sensitivity: 'low' });
     await adapter.set('high-c', 'hi', { sensitivity: 'high' });
-    expect(mgr.allKeys('cookie').length).toBe(2);
+    expect(mgr.allKeys('cookie').length).toBe(4);
 
     const wiped: string[] = [];
     await adapter.wipeAll(wiped);
@@ -444,7 +444,7 @@ describe('CookieAdapter', () => {
     expect(wiped.every((w) => w.startsWith('cookie:'))).toBe(true);
     expect(wiped.includes('cookie:low-c')).toBe(true);
     expect(wiped.includes('cookie:high-c')).toBe(true);
-    expect(wiped.filter((w) => w.includes('t_')).length).toBe(2);
+    expect(wiped.filter((w) => w.includes('t_')).length).toBe(4);
 
     // In-session honey registry cleared
     expect(mgr.allKeys('cookie').length).toBe(0);

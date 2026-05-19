@@ -5,6 +5,14 @@ Format follows [Conventional Commits](https://www.conventionalcommits.org).
 
 ---
 
+## [0.1.6] — 2026-05-19
+
+### Fixed
+
+- **Honey key generation now cumulative per write** — `prepareHoneyKeys` in all four adapters (`localStorage`, `sessionStorage`, `cookie`, `indexedDB`) was computing `needed = config.honeyKeys.count - existingHoneyCount`. After the first write filled the pool, `needed` became `0` for every subsequent write and no new decoys were ever planted. Fixed to always generate `config.honeyKeys.count` fresh honey keys on every write, matching the documented behaviour: N writes with `count: 3` produce N real keys and N × 3 honey keys. The `maxPerBackend` FIFO-eviction cap continues to bound memory in long-lived sessions.
+
+---
+
 ## [0.1.5] — 2026-05-18
 
 ### Added

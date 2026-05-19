@@ -642,7 +642,7 @@ export class SessionStorageAdapter implements IStorageAdapter {
   private prepareHoneyKeys(backend: string): string[] {
     const mgr = this.honeyManager as HoneyKeyManager | null;
     if (!mgr?.isEnabled) return [];
-    const needed = this.config.honeyKeys.count - mgr.allKeys(backend).length;
+    const needed = this.config.honeyKeys.count;
     if (needed <= 0) return [];
     const existingAliases = [...this.keyRegistry];
     const honeyStorageKeys = mgr.generateHoneyKeys(backend, existingAliases, needed);

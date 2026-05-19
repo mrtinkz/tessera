@@ -160,7 +160,7 @@ export class CookieAdapter implements ICookieAdapter {
   private prepareHoneyKeys(): string[] {
     const mgr = this.honeyManager as HoneyKeyManager | null;
     if (!mgr?.isEnabled) return [];
-    const needed = this.config.honeyKeys.count - mgr.allKeys('cookie').length;
+    const needed = this.config.honeyKeys.count;
     if (needed <= 0) return [];
     const existingAliases = [...this.cookieNames];
     const honeyStorageKeys = mgr.generateHoneyKeys('cookie', existingAliases, needed);

@@ -375,8 +375,8 @@ describe('LocalStorageAdapter', () => {
     expect(wiped.some((w) => w.includes('session:') || w.includes('local:'))).toBe(true);
   });
 
-  // addHoneyKeys: needed <= 0 branch (already satisfied)
-  it('should skip honey key generation when needed count is already satisfied', async () => {
+  // addHoneyKeys: each set generates `count` new honey keys (cumulative)
+  it('should generate new honey keys on every set, accumulating per write', async () => {
     const config = resolveConfig({ honeyKeys: { count: 2 } } as Parameters<
       typeof resolveConfig
     >[0]);
@@ -389,9 +389,9 @@ describe('LocalStorageAdapter', () => {
     await adapter.setItem('hk-first-ls', 'v1');
     expect(mgr.allKeys('local').length).toBe(2);
 
-    // Second setItem: needed = 2 - 2 = 0 → early return
+    // Second setItem: generates 2 more honey keys (cumulative: 4 total)
     await adapter.setItem('hk-second-ls', 'v2');
-    expect(mgr.allKeys('local').length).toBe(2);
+    expect(mgr.allKeys('local').length).toBe(4);
   });
 
   // getRawKey returns the developer key unchanged when session is locked
@@ -557,11 +557,11 @@ describe('LocalStorageAdapter', () => {
     await adapter.setItem('low-key', 'lo', { sensitivity: 'low' });
     await adapter.setItem('high-key', 'hi', { sensitivity: 'high' });
     const honeyKeysBefore = mgr.allKeys('local');
-    expect(honeyKeysBefore.length).toBe(2);
+    expect(honeyKeysBefore.length).toBe(4);
 
     // Confirm all three kinds of t_ entry exist before wipe
     const tKeysBefore = Object.keys(localStorage).filter((k) => k.startsWith('t_'));
-    expect(tKeysBefore.length).toBeGreaterThanOrEqual(3); // 2 real + 2 honey
+    expect(tKeysBefore.length).toBeGreaterThanOrEqual(3); // 2 real + 4 honey
 
     const wiped: string[] = [];
     await adapter.wipeAll(wiped);

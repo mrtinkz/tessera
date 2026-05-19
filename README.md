@@ -941,11 +941,19 @@ tessera targets the [OWASP browser storage threat model](https://owasp.org/www-c
 
 ## Changelog
 
-> **Latest release: 0.1.5.** Security hardening, new vault methods, and a bug fix. Always use the latest version:
+> **Latest release: 0.1.6.** Honey key cumulative-generation fix. Always use the latest version:
 >
 > ```bash
 > npm install @mrtinkz/tessera@latest
 > ```
+
+### 0.1.6
+
+Bug fix — no breaking API changes, no migration required.
+
+| Area                                | What changed                                                                                                                                                                                                                                                                                     |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Honey key generation (all adapters) | `prepareHoneyKeys` was computing `needed = count − existingHoneyCount`, so after the first write filled the pool no new decoys were ever planted. Fixed to always generate `count` fresh honey keys per write. N writes now produce N × count decoys (subject to `maxPerBackend` FIFO eviction). |
 
 ### 0.1.5
 

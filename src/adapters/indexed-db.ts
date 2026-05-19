@@ -622,7 +622,7 @@ export class IndexedDbAdapter implements IIDBAdapter {
     const mgr = this.honeyManager as HoneyKeyManager | null;
     /* v8 ignore next */
     if (!mgr?.isEnabled) return [];
-    const needed = this.config.honeyKeys.count - mgr.allKeys('idb').length;
+    const needed = this.config.honeyKeys.count;
     /* v8 ignore next */
     if (needed <= 0) return [];
     const honeyStorageKeys = mgr.generateHoneyKeys('idb', [], needed);
